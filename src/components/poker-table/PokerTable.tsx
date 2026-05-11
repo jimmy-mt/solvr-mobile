@@ -1,4 +1,5 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef } from 'react';
+import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
 import Svg, {
   Defs,
   FeDropShadow,
@@ -32,11 +33,26 @@ export function PokerTable({
   blindAmounts = {},
   stackAmounts = {},
   theme = 'green',
+  dealKey,
 }: PokerTableProps) {
   const tableColors =
     theme === 'blue'
       ? { feltCenter: '#2563eb', feltEdge: '#0f3f8a', rim: '#081a2f', rail: '#1d4ed8' }
       : { feltCenter: '#2e7d35', feltEdge: '#174f1e', rim: '#0d2412', rail: '#1a5c24' };
+  const translateY = useRef(new Animated.Value(28)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    translateY.setValue(28);
+    opacity.setValue(0);
+    const anim = Animated.parallel([
+      Animated.timing(translateY, { toValue: 0, duration: 250, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 1, duration: 250, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: true }),
+    ]);
+    anim.start();
+    return () => anim.stop();
+  }, [dealKey]);
+
   const foldedSet = new Set(foldedPositions);
   const { topSeat, rightSeats, leftSeats } = getSeatsRelativeToHero(heroPos);
   const committedBySeat = { ...blindAmounts, ...raiseAmounts };
@@ -44,7 +60,7 @@ export function PokerTable({
 
   return (
     <View style={styles.outer}>
-      <View style={styles.tableFrame}>
+      <Animated.View style={[styles.tableFrame, { transform: [{ translateY }], opacity }]}>
         <Svg
           viewBox="-50 -150 600 1000"
           preserveAspectRatio="xMidYMid meet"
@@ -79,11 +95,11 @@ export function PokerTable({
 
         {cards && (
           <View pointerEvents="none" style={styles.cardRow}>
-            <PokerCard card={cards[0]} />
-            <PokerCard card={cards[1]} />
+            <PokerCard card={cards[0]} cardIndex={0} animDelay={0} dealKey={dealKey} />
+            <PokerCard card={cards[1]} cardIndex={1} animDelay={40} dealKey={dealKey} />
           </View>
         )}
-      </View>
+      </Animated.View>
     </View>
   );
 }

@@ -1,5 +1,5 @@
-import { PlaceholderScreen } from '../../src/components/PlaceholderScreen';
+import { RangesScreen } from '../../src/screens/ranges/RangesScreen';
 
 export default function RangesTab() {
-  return <PlaceholderScreen title="Ranges" subtitle="Range browsing and grids will live here." />;
+  return <RangesScreen />;
 }

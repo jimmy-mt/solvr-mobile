@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { LinearGradient } from 'expo-linear-gradient';
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   Platform,
   Pressable,
   ScrollView,
@@ -13,12 +16,14 @@ import { useSQLiteContext } from 'expo-sqlite';
 
 import { PokerTable } from '../../components/poker-table/PokerTable';
 import { pokerTablePropsFromSpot } from '../../components/poker-table/trainerTableAdapter';
+import { RangeGrid, RangeLegend } from '../../components/range-grid/RangeGrid';
 import { C } from '../../constants/colors';
 import {
   availableActionsForSpot,
   dealRandomTrainerHand,
   formatBB,
   getActionFrequency,
+  scenarioLabel,
   type SpotTypeFilter,
   type TrainerAction,
   type TrainerDeal,
@@ -49,7 +54,22 @@ export function TrainerScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState({ correct: 0, total: 0 });
+  const [solvrScore, setSolvrScore] = useState<{ sum: number; count: number }>({ sum: 0, count: 0 });
+  const [lastHandScore, setLastHandScore] = useState<number | null>(null);
+  const [dealKey, setDealKey] = useState(0);
+  const [showHint, setShowHint] = useState(false);
+  const [hintClosing, setHintClosing] = useState(false);
+  const [filtersClosing, setFiltersClosing] = useState(false);
   const hasLoadedRef = useRef(false);
+  const hintCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const filtersCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (hintCloseTimer.current) clearTimeout(hintCloseTimer.current);
+      if (filtersCloseTimer.current) clearTimeout(filtersCloseTimer.current);
+    };
+  }, []);
 
   const loadHand = useCallback(async () => {
     const isInitialLoad = !hasLoadedRef.current;
@@ -65,6 +85,9 @@ export function TrainerScreen() {
       setDeal(nextDeal);
       setPicked(null);
       setPhase('quiz');
+      setShowHint(false);
+      setHintClosing(false);
+      setDealKey((k) => k + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load trainer.db.');
     } finally {
@@ -85,12 +108,19 @@ export function TrainerScreen() {
   function answer(action: TrainerAction) {
     if (!deal || phase === 'result') return;
     const correct = getActionFrequency(action, deal.handFreq) > 0;
+    const score = computeSolvrScore(action, deal.handFreq);
+    setShowHint(false);
+    setHintClosing(false);
+    setShowFilters(false);
+    setFiltersClosing(false);
     setPicked(action);
     setPhase('result');
+    setLastHandScore(score);
     setStats((current) => ({
       correct: current.correct + (correct ? 1 : 0),
       total: current.total + 1,
     }));
+    setSolvrScore((current) => ({ sum: current.sum + score, count: current.count + 1 }));
   }
 
   function changeFilter(filter: SpotTypeFilter) {
@@ -100,7 +130,47 @@ export function TrainerScreen() {
     setPosFilter([]);
   }
 
+  function openHint() {
+    if (hintCloseTimer.current) clearTimeout(hintCloseTimer.current);
+    closeFilters();
+    setHintClosing(false);
+    setShowHint(true);
+  }
+
+  function closeHint() {
+    if (!showHint || hintClosing) return;
+    setHintClosing(true);
+    if (hintCloseTimer.current) clearTimeout(hintCloseTimer.current);
+    hintCloseTimer.current = setTimeout(() => {
+      setShowHint(false);
+      setHintClosing(false);
+    }, 180);
+  }
+
+  function openFilters() {
+    if (filtersCloseTimer.current) clearTimeout(filtersCloseTimer.current);
+    closeHint();
+    setFiltersClosing(false);
+    setShowFilters(true);
+  }
+
+  function closeFilters() {
+    if (!showFilters || filtersClosing) return;
+    setFiltersClosing(true);
+    if (filtersCloseTimer.current) clearTimeout(filtersCloseTimer.current);
+    filtersCloseTimer.current = setTimeout(() => {
+      setShowFilters(false);
+      setFiltersClosing(false);
+    }, 180);
+  }
+
+  function toggleFilters() {
+    if (showFilters) closeFilters();
+    else openFilters();
+  }
+
   const accuracy = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
+  const sessionSolvr = solvrScore.count > 0 ? Math.round((solvrScore.sum / solvrScore.count) * 100) : null;
   const filterActive = testMode || wrongPracticeMode || posFilter.length > 0 || spotTypeFilter !== 'ANY';
   const availableActions = deal ? availableActionsForSpot(deal.hands) : [];
   const overlayTop =
@@ -109,14 +179,22 @@ export function TrainerScreen() {
     42;
 
   return (
-    <View style={styles.screen}>
+    <View style={[styles.screen, phase === 'result' && (selectedCorrect ? styles.screenResultCorrect : styles.screenResultWrong)]}>
+      {phase === 'result' && <FullScreenShimmer trigger={dealKey} />}
       <ScrollView
-        style={styles.screen}
+        style={[styles.screen, { backgroundColor: 'transparent' }]}
         contentContainerStyle={styles.screenContent}
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.filterHeader}>
-        <Pressable style={styles.infoButton}>
+        {phase !== 'result' && <View style={styles.filterHeader}>
+        <Pressable
+          onPress={() => {
+            if (!deal || isLoading || error) return;
+            if (showHint) closeHint();
+            else openHint();
+          }}
+          style={[styles.infoButton, showHint && styles.infoButtonActive]}
+        >
           <Text style={styles.infoButtonText}>i</Text>
         </Pressable>
 
@@ -142,26 +220,20 @@ export function TrainerScreen() {
             <>
               <View style={styles.statPill}>
                 <Text style={styles.statPillText}>
-                  {stats.correct}/{stats.total} - {accuracy}%
+                  {stats.correct}/{stats.total} - {accuracy}%{sessionSolvr !== null ? ` · S ${sessionSolvr}` : ''}
                 </Text>
               </View>
-              <Pressable onPress={() => setStats({ correct: 0, total: 0 })} style={styles.smallHeaderButton}>
+              <Pressable onPress={() => { setStats({ correct: 0, total: 0 }); setSolvrScore({ sum: 0, count: 0 }); setLastHandScore(null); }} style={styles.smallHeaderButton}>
                 <Text style={styles.smallHeaderButtonText}>New Session</Text>
               </Pressable>
             </>
           )}
         </View>
 
-        <Pressable
-          onPress={() => setShowFilters((current) => !current)}
-          style={styles.filtersToggle}
-        >
-          <Text style={styles.filtersToggleIcon}>≡</Text>
-          <Text style={styles.filtersToggleText}>Filters {filterActive ? '●' : ''}</Text>
-        </Pressable>
-      </View>
+        <AnimatedFiltersButton active={filterActive} onPress={toggleFilters} />
+      </View>}
 
-        <View style={styles.progressTrack}>
+        {phase !== 'result' && <View style={styles.progressTrack}>
           <View
             style={[
               styles.progressFill,
@@ -171,7 +243,7 @@ export function TrainerScreen() {
             },
             ]}
           />
-        </View>
+        </View>}
 
         {isLoading ? (
         <View style={styles.statePanel}>
@@ -189,12 +261,13 @@ export function TrainerScreen() {
         <TrainerResultView
           deal={deal}
           selectedCorrect={selectedCorrect}
+          solvrScore={lastHandScore}
           onNextHand={loadHand}
         />
       ) : deal ? (
         <>
           <View style={styles.tableStage}>
-            <PokerTable {...pokerTablePropsFromSpot(deal.spot, deal.hand)} />
+            <PokerTable {...pokerTablePropsFromSpot(deal.spot, deal.hand)} dealKey={dealKey} />
           </View>
 
           <View style={styles.actionDock}>
@@ -222,39 +295,216 @@ export function TrainerScreen() {
       </ScrollView>
 
       {showFilters && (
-        <Pressable onPress={() => setShowFilters(false)} style={styles.filtersOverlay}>
-          <Pressable
-            onPress={(event) => event.stopPropagation()}
-            style={[styles.filtersOverlayPanel, { top: overlayTop }]}
-          >
-            <TrainerFiltersPanel
-              spotTypeFilter={spotTypeFilter}
-              posFilter={posFilter}
-              wrongPracticeMode={wrongPracticeMode}
-              testMode={testMode}
-              onSpotTypeChange={changeFilter}
-              onPositionToggle={(position) => {
-                setWrongPracticeMode(false);
-                setTestMode(false);
-                setPosFilter((current) =>
-                  current.includes(position)
-                    ? current.filter((item) => item !== position)
-                    : [...current, position],
-                );
-              }}
-              onImproveToggle={() => {
-                setTestMode(false);
-                setWrongPracticeMode((current) => !current);
-              }}
-              onTestToggle={() => {
-                setWrongPracticeMode(false);
-                setTestMode((current) => !current);
-              }}
-            />
-          </Pressable>
-        </Pressable>
+        <TrainerFiltersOverlay
+          closing={filtersClosing}
+          onClose={closeFilters}
+          top={overlayTop}
+        >
+          <TrainerFiltersPanel
+            spotTypeFilter={spotTypeFilter}
+            posFilter={posFilter}
+            wrongPracticeMode={wrongPracticeMode}
+            testMode={testMode}
+            onSpotTypeChange={changeFilter}
+            onPositionToggle={(position) => {
+              setWrongPracticeMode(false);
+              setTestMode(false);
+              setPosFilter((current) =>
+                current.includes(position)
+                  ? current.filter((item) => item !== position)
+                  : [...current, position],
+              );
+            }}
+            onImproveToggle={() => {
+              setTestMode(false);
+              setWrongPracticeMode((current) => !current);
+            }}
+            onTestToggle={() => {
+              setWrongPracticeMode(false);
+              setTestMode((current) => !current);
+            }}
+          />
+        </TrainerFiltersOverlay>
+      )}
+
+      {showHint && deal && phase === 'quiz' && (
+        <HintRangeOverlay
+          closing={hintClosing}
+          deal={deal}
+          onClose={closeHint}
+          top={overlayTop}
+        />
       )}
     </View>
+  );
+}
+
+function AnimatedFiltersButton({ active, onPress }: { active: boolean; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress}>
+      <View style={styles.filtersToggle}>
+        <Text style={styles.filtersToggleIcon}>≡</Text>
+        <Text style={styles.filtersToggleText}>Filters</Text>
+        <AnimatedFilterDot active={active} />
+      </View>
+    </Pressable>
+  );
+}
+
+function AnimatedFilterDot({ active }: { active: boolean }) {
+  const progress = useRef(new Animated.Value(active ? 1 : 0)).current;
+
+  useEffect(() => {
+    const anim = Animated.timing(progress, {
+      toValue: active ? 1 : 0,
+      duration: active ? 180 : 140,
+      easing: active ? Easing.out(Easing.back(1.6)) : Easing.in(Easing.cubic),
+      useNativeDriver: false,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [active]);
+
+  const size = progress.interpolate({ inputRange: [0, 1], outputRange: [0, 6] });
+  const marginLeft = progress.interpolate({ inputRange: [0, 1], outputRange: [-5, 0] });
+
+  return (
+    <Animated.View
+      style={[
+        styles.filtersToggleDot,
+        {
+          width: size,
+          height: size,
+          marginLeft,
+          opacity: progress,
+        },
+      ]}
+    />
+  );
+}
+
+function HintRangeOverlay({
+  closing,
+  deal,
+  onClose,
+  top,
+}: {
+  closing: boolean;
+  deal: TrainerDeal;
+  onClose: () => void;
+  top: number;
+}) {
+  const progress = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const anim = Animated.timing(progress, {
+      toValue: closing ? 0 : 1,
+      duration: closing ? 160 : 220,
+      easing: closing ? Easing.in(Easing.cubic) : Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [closing]);
+
+  return (
+    <Pressable onPress={onClose} style={styles.hintOverlay}>
+      <Animated.View
+        style={[
+          styles.hintAnimatedPanel,
+          {
+            top,
+            opacity: progress,
+            transform: [
+              {
+                translateY: progress.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [-18, 0],
+                }),
+              },
+              {
+                scale: progress.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.985, 1],
+                }),
+              },
+            ],
+          },
+        ]}
+      >
+        <Pressable onPress={(event) => event.stopPropagation()} style={styles.hintPanel}>
+          <View style={styles.hintHeader}>
+            <View style={styles.hintTitleGroup}>
+              <Text style={styles.hintTitle}>{deal.spot.hero} Range</Text>
+              <Text style={styles.hintSubtitle}>{scenarioLabel(deal.spot)}</Text>
+            </View>
+            <Pressable onPress={onClose} style={styles.hintCloseButton}>
+              <Text style={styles.hintCloseText}>x</Text>
+            </Pressable>
+          </View>
+          <RangeLegend hands={deal.hands} />
+          <RangeGrid hands={deal.hands} highlightHand={deal.hand} />
+        </Pressable>
+      </Animated.View>
+    </Pressable>
+  );
+}
+
+
+function TrainerFiltersOverlay({
+  children,
+  closing,
+  onClose,
+  top,
+}: {
+  children: ReactNode;
+  closing: boolean;
+  onClose: () => void;
+  top: number;
+}) {
+  const progress = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const anim = Animated.timing(progress, {
+      toValue: closing ? 0 : 1,
+      duration: closing ? 160 : 220,
+      easing: closing ? Easing.in(Easing.cubic) : Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [closing]);
+
+  return (
+    <Pressable onPress={onClose} style={styles.filtersOverlay}>
+      <Animated.View
+        style={[
+          styles.filtersOverlayPanel,
+          {
+            top,
+            opacity: progress,
+            transform: [
+              {
+                translateY: progress.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [-18, 0],
+                }),
+              },
+              {
+                scale: progress.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.985, 1],
+                }),
+              },
+            ],
+          },
+        ]}
+      >
+        <Pressable onPress={(event) => event.stopPropagation()}>
+          {children}
+        </Pressable>
+      </Animated.View>
+    </Pressable>
   );
 }
 
@@ -353,36 +603,232 @@ function TrainerFiltersPanel({
   );
 }
 
+function FullScreenShimmer({ trigger }: { trigger: number }) {
+  const shimmerX = useRef(new Animated.Value(-600)).current;
+  const shimmerOpacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    shimmerX.setValue(-600);
+    shimmerOpacity.setValue(0);
+    const anim = Animated.parallel([
+      Animated.timing(shimmerX, { toValue: 900, duration: 700, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+      Animated.sequence([
+        Animated.timing(shimmerOpacity, { toValue: 1, duration: 80, easing: Easing.ease, useNativeDriver: true }),
+        Animated.delay(400),
+        Animated.timing(shimmerOpacity, { toValue: 0, duration: 220, easing: Easing.ease, useNativeDriver: true }),
+      ]),
+    ]);
+    anim.start();
+    return () => anim.stop();
+  }, [trigger]);
+
+  return (
+    <View pointerEvents="none" style={[StyleSheet.absoluteFillObject, styles.shimmerClip]}>
+      <Animated.View
+        style={[
+          styles.shimmerBand,
+          { transform: [{ translateX: shimmerX }, { skewX: '-15deg' }], opacity: shimmerOpacity },
+        ]}
+      >
+        <LinearGradient
+          colors={['transparent', 'rgba(255,255,255,0.04)', 'rgba(255,255,255,0.12)', 'rgba(255,255,255,0.04)', 'transparent']}
+          locations={[0, 0.3, 0.5, 0.7, 1]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
+    </View>
+  );
+}
+
+const springEasing = Easing.bezier(0.34, 1.56, 0.64, 1);
+const slideEasing = Easing.bezier(0.22, 1, 0.36, 1);
+
+function useSlideUp(delay: number) {
+  const translateY = useRef(new Animated.Value(28)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    translateY.setValue(28);
+    opacity.setValue(0);
+    const anim = Animated.sequence([
+      Animated.delay(delay),
+      Animated.parallel([
+        Animated.timing(translateY, { toValue: 0, duration: 250, easing: slideEasing, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 250, easing: slideEasing, useNativeDriver: true }),
+      ]),
+    ]);
+    anim.start();
+    return () => anim.stop();
+  }, []);
+  return { transform: [{ translateY }], opacity };
+}
+
 function TrainerResultView({
   deal,
   selectedCorrect,
+  solvrScore,
   onNextHand,
 }: {
   deal: TrainerDeal;
   selectedCorrect: boolean;
+  solvrScore: number | null;
   onNextHand: () => void;
 }) {
+  // resultBounce: scale 0.6→1.06→0.97→1, translateY 20→-4→0, opacity 0→1
+  const labelScale = useRef(new Animated.Value(0.6)).current;
+  const labelTranslateY = useRef(new Animated.Value(20)).current;
+  const labelOpacity = useRef(new Animated.Value(0)).current;
+
+
+  // gridReveal: scale 0.94→1, opacity 0→1
+  const gridScale = useRef(new Animated.Value(0.94)).current;
+  const gridOpacity = useRef(new Animated.Value(0)).current;
+
+  const freqSlide = useSlideUp(70);
+  const rangeSlide = useSlideUp(120);
+
+  useEffect(() => {
+    labelScale.setValue(0.6);
+    labelTranslateY.setValue(20);
+    labelOpacity.setValue(0);
+    gridScale.setValue(0.94);
+    gridOpacity.setValue(0);
+
+    const labelAnim = Animated.parallel([
+      Animated.timing(labelScale, { toValue: 1, duration: 350, easing: springEasing, useNativeDriver: true }),
+      Animated.timing(labelTranslateY, { toValue: 0, duration: 350, easing: springEasing, useNativeDriver: true }),
+      Animated.timing(labelOpacity, { toValue: 1, duration: 180, easing: slideEasing, useNativeDriver: true }),
+    ]);
+
+
+    const gridAnim = Animated.sequence([
+      Animated.delay(170),
+      Animated.parallel([
+        Animated.timing(gridScale, { toValue: 1, duration: 270, easing: slideEasing, useNativeDriver: true }),
+        Animated.timing(gridOpacity, { toValue: 1, duration: 270, easing: slideEasing, useNativeDriver: true }),
+      ]),
+    ]);
+
+    labelAnim.start();
+    gridAnim.start();
+
+    return () => {
+      labelAnim.stop();
+      gridAnim.stop();
+    };
+  }, []);
+
   return (
     <View style={styles.resultScreen}>
-      <View style={styles.resultStatus}>
-        <Text
+      <View style={styles.resultTopRow}>
+        <Animated.Text
           style={[
             styles.resultStatusText,
             selectedCorrect ? styles.resultStatusCorrect : styles.resultStatusWrong,
+            { transform: [{ scale: labelScale }, { translateY: labelTranslateY }], opacity: labelOpacity },
           ]}
         >
           {selectedCorrect ? 'Correct' : 'Wrong'}
-        </Text>
+        </Animated.Text>
+        {solvrScore !== null && (
+          <Animated.View style={[styles.solvrPill, { opacity: labelOpacity, transform: [{ scale: labelScale }] }]}>
+            <Text style={styles.solvrPillValue}>{Math.round(solvrScore * 100)}</Text>
+            <Text style={styles.solvrPillLabel}>Solvr</Text>
+          </Animated.View>
+        )}
       </View>
 
-      <View style={styles.resultRangePanel}>
+      <Animated.View style={[styles.freqPanel, freqSlide]}>
+        <View style={styles.freqPanelHeader}>
+          <Text style={styles.freqHandLabel}>{deal.hand}</Text>
+          <View style={styles.freqLegend}>
+            {deal.handFreq.fold_freq > 0 && (
+              <View style={styles.freqLegendItem}>
+                <View style={[styles.freqLegendDot, { backgroundColor: C.blue }]} />
+                <Text style={styles.freqLegendText}>Fold {Math.round(deal.handFreq.fold_freq)}%</Text>
+              </View>
+            )}
+            {deal.handFreq.call_freq > 0 && (
+              <View style={styles.freqLegendItem}>
+                <View style={[styles.freqLegendDot, { backgroundColor: C.green }]} />
+                <Text style={styles.freqLegendText}>Call {Math.round(deal.handFreq.call_freq)}%</Text>
+              </View>
+            )}
+            {deal.handFreq.raise_freq > 0 && (
+              <View style={styles.freqLegendItem}>
+                <View style={[styles.freqLegendDot, { backgroundColor: C.red }]} />
+                <Text style={styles.freqLegendText}>Raise {Math.round(deal.handFreq.raise_freq)}%</Text>
+              </View>
+            )}
+            {deal.handFreq.all_in_freq > 0 && (
+              <View style={styles.freqLegendItem}>
+                <View style={[styles.freqLegendDot, { backgroundColor: C.allIn }]} />
+                <Text style={styles.freqLegendText}>All-in {Math.round(deal.handFreq.all_in_freq)}%</Text>
+              </View>
+            )}
+          </View>
+        </View>
+        <AnimatedFreqBar handFreq={deal.handFreq} />
+      </Animated.View>
+
+      <Animated.View style={[styles.resultRangePanel, rangeSlide]}>
         <Text style={styles.resultRangeTitle}>{deal.spot.hero} Range</Text>
-        <RangeGrid deal={deal} />
-      </View>
+        <Animated.View style={{ transform: [{ scale: gridScale }], opacity: gridOpacity }}>
+          <RangeGrid hands={deal.hands} highlightHand={deal.hand} />
+        </Animated.View>
+      </Animated.View>
 
-      <Pressable onPress={onNextHand} style={styles.resultNextButton}>
-        <Text style={styles.resultNextButtonText}>Next Hand</Text>
-      </Pressable>
+      <View style={styles.resultNextDock}>
+        <Pressable onPress={onNextHand} style={[styles.actionButton, styles.resultNextButton]}>
+          <Text style={styles.resultNextButtonText}>Next Hand</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function AnimatedFreqBar({ handFreq }: { handFreq: TrainerDeal['handFreq'] }) {
+  const segments = [
+    { freq: handFreq.fold_freq, color: C.blue },
+    { freq: handFreq.call_freq, color: C.green },
+    { freq: handFreq.raise_freq, color: C.red },
+    { freq: handFreq.all_in_freq, color: C.allIn },
+  ].filter((s) => s.freq > 0);
+
+  const total = segments.reduce((sum, s) => sum + s.freq, 0);
+
+  const animValues = useRef(segments.map(() => new Animated.Value(0))).current;
+
+  useEffect(() => {
+    animValues.forEach((v) => v.setValue(0));
+    const anims = segments.map((s, i) =>
+      Animated.sequence([
+        Animated.delay(200),
+        Animated.timing(animValues[i], {
+          toValue: (s.freq / total) * 100,
+          duration: 900,
+          easing: slideEasing,
+          useNativeDriver: false,
+        }),
+      ])
+    );
+    const anim = Animated.parallel(anims);
+    anim.start();
+    return () => anim.stop();
+  }, []);
+
+  return (
+    <View style={styles.freqBar}>
+      {segments.map((s, i) => (
+        <Animated.View
+          key={i}
+          style={[
+            styles.freqSegment,
+            { width: animValues[i].interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }), backgroundColor: s.color, flex: undefined },
+          ]}
+        />
+      ))}
     </View>
   );
 }
@@ -392,58 +838,20 @@ function actionLabel(action: TrainerAction, raiseBB: number) {
   return action;
 }
 
-function RangeGrid({ deal }: { deal: TrainerDeal }) {
-  return (
-    <View style={styles.rangeGrid}>
-      {ranks.map((rowRank, rowIndex) => {
-        return ranks.map((columnRank, columnIndex) => {
-          const label = handLabel(rowRank, columnRank, rowIndex, columnIndex);
-          const frequencies = deal.hands[label];
-          const highlighted = label === deal.hand;
-          return (
-            <View
-              key={label}
-              style={[
-                styles.rangeCell,
-                { backgroundColor: rangeCellColor(frequencies) },
-                highlighted && styles.rangeCellActive,
-              ]}
-            >
-              <Text style={[styles.rangeCellText, highlighted && styles.rangeCellTextActive]}>
-                {label}
-              </Text>
-            </View>
-          );
-        });
-      })}
-    </View>
-  );
-}
 
-function handLabel(
-  rowRank: string,
-  columnRank: string,
-  rowIndex: number,
-  columnIndex: number,
-) {
-  if (rowIndex === columnIndex) return rowRank + columnRank;
-  if (rowIndex < columnIndex) return rowRank + columnRank + 's';
-  return columnRank + rowRank + 'o';
-}
-
-function rangeCellColor(frequencies?: TrainerDeal['handFreq']) {
-  if (!frequencies || !frequencies.possible) return '#100c2f';
-  const raise = frequencies.raise_freq || 0;
-  const allIn = frequencies.all_in_freq || 0;
-  const call = frequencies.call_freq || 0;
-  const fold = frequencies.fold_freq || 0;
-  const max = Math.max(raise, allIn, call, fold);
-
-  if (max === allIn && allIn > 0) return C.allIn;
-  if (max === raise && raise > 0) return C.red;
-  if (max === call && call > 0) return C.green;
-  if (max === fold && fold > 0) return C.blue;
-  return C.surface2;
+function computeSolvrScore(action: TrainerAction, handFreq: TrainerDeal['handFreq']): number {
+  const strategy = {
+    fold: handFreq.fold_freq,
+    call: handFreq.call_freq,
+    raise: handFreq.raise_freq,
+    all_in: handFreq.all_in_freq,
+  };
+  const actionKey = action === 'All-in' ? 'all_in' : (action.toLowerCase() as keyof typeof strategy);
+  const chosenFreq = strategy[actionKey] ?? 0;
+  if (chosenFreq === 0) return 0;
+  const dominantFreq = Math.max(...Object.values(strategy));
+  const deviation = Math.max(0, dominantFreq - chosenFreq);
+  return Math.max(0, Math.min(1, 1 - Math.pow(deviation / 100, 4)));
 }
 
 function actionStyle(action: TrainerAction) {
@@ -488,6 +896,10 @@ const styles = StyleSheet.create({
     height: 28,
     justifyContent: 'center',
     width: 28,
+  },
+  infoButtonActive: {
+    backgroundColor: C.purple,
+    borderColor: C.purpleLight,
   },
   infoButtonText: {
     color: C.textSec,
@@ -549,8 +961,8 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
     flexDirection: 'row',
-    gap: 5,
-    paddingHorizontal: 12,
+    gap: 4,
+    paddingHorizontal: 10,
     paddingVertical: 6,
   },
   filtersToggleIcon: {
@@ -563,6 +975,10 @@ const styles = StyleSheet.create({
     color: C.textSec,
     fontSize: 11,
     fontWeight: '900',
+  },
+  filtersToggleDot: {
+    backgroundColor: C.purpleLight,
+    borderRadius: 999,
   },
   progressTrack: {
     backgroundColor: C.surface2,
@@ -584,6 +1000,69 @@ const styles = StyleSheet.create({
     left: 20,
     position: 'absolute',
     right: 20,
+  },
+  hintOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 60,
+  },
+  hintAnimatedPanel: {
+    left: 10,
+    position: 'absolute',
+    right: 10,
+  },
+  hintPanel: {
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.42,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 16 },
+    elevation: 14,
+  },
+  hintHeader: {
+    alignItems: 'center',
+    backgroundColor: C.surface2,
+    borderColor: C.border,
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+  },
+  hintTitleGroup: {
+    flex: 1,
+    paddingRight: 10,
+  },
+  hintTitle: {
+    color: C.text,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  hintSubtitle: {
+    color: C.textMuted,
+    fontSize: 9,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  hintCloseButton: {
+    alignItems: 'center',
+    borderColor: C.border,
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 24,
+    justifyContent: 'center',
+    width: 24,
+  },
+  hintCloseText: {
+    color: C.textSec,
+    fontSize: 12,
+    fontWeight: '900',
+    lineHeight: 12,
   },
   filtersPanel: {
     backgroundColor: C.surface,
@@ -862,15 +1341,53 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     textAlign: 'center',
   },
+  screenResultCorrect: {
+    backgroundColor: '#14532d',
+  },
+  screenResultWrong: {
+    backgroundColor: '#7f1d1d',
+  },
   resultScreen: {
     flexGrow: 1,
+    flexDirection: 'column',
+    justifyContent: 'space-between',
     gap: 14,
+    marginHorizontal: -20,
     paddingBottom: 6,
-  },
-  resultStatus: {
-    alignItems: 'center',
-    paddingBottom: 8,
+    paddingHorizontal: 8,
     paddingTop: 10,
+  },
+  resultNextDock: {
+    flexDirection: 'row',
+    marginHorizontal: -8,
+  },
+  resultTopRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  solvrPill: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  solvrPillValue: {
+    color: C.purplePale,
+    fontSize: 22,
+    fontWeight: '900',
+    lineHeight: 26,
+  },
+  solvrPillLabel: {
+    color: C.textMuted,
+    fontSize: 9,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   resultStatusText: {
     color: 'white',
@@ -878,9 +1395,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0,
     lineHeight: 42,
-    textShadowColor: 'rgba(0,0,0,0.24)',
-    textShadowOffset: { width: 0, height: 8 },
-    textShadowRadius: 22,
+    textAlign: 'center',
     textTransform: 'uppercase',
   },
   resultStatusCorrect: {
@@ -889,12 +1404,62 @@ const styles = StyleSheet.create({
   resultStatusWrong: {
     color: C.red,
   },
+  freqPanel: {
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 10,
+    padding: 14,
+  },
+  freqPanelHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  freqHandLabel: {
+    color: C.text,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  freqLegend: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    justifyContent: 'flex-end',
+  },
+  freqLegendItem: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 4,
+  },
+  freqLegendDot: {
+    borderRadius: 999,
+    height: 8,
+    width: 8,
+  },
+  freqLegendText: {
+    color: C.textSec,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  freqBar: {
+    borderRadius: 6,
+    flexDirection: 'row',
+    height: 16,
+    overflow: 'hidden',
+    gap: 2,
+  },
+  freqSegment: {
+    height: '100%',
+    borderRadius: 3,
+  },
   resultRangePanel: {
     backgroundColor: C.surface,
     borderColor: C.border,
     borderRadius: 18,
     borderWidth: 1,
-    padding: 14,
+    padding: 6,
   },
   resultRangeTitle: {
     color: C.textSec,
@@ -903,12 +1468,18 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     textAlign: 'center',
   },
+  shimmerClip: {
+    overflow: 'hidden',
+  },
+  shimmerBand: {
+    position: 'absolute',
+    top: -300,
+    bottom: -300,
+    left: -150,
+    width: 220,
+  },
   resultNextButton: {
-    alignItems: 'center',
     backgroundColor: C.purple,
-    borderRadius: 15,
-    marginTop: 'auto',
-    paddingVertical: 16,
   },
   resultNextButtonText: {
     color: 'white',
@@ -926,31 +1497,5 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 14,
     fontWeight: '900',
-  },
-  rangeGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 3,
-  },
-  rangeCell: {
-    alignItems: 'center',
-    aspectRatio: 1,
-    borderColor: 'rgba(255,255,255,0.04)',
-    borderRadius: 4,
-    borderWidth: 1,
-    justifyContent: 'center',
-    width: '7.1%',
-  },
-  rangeCellActive: {
-    borderColor: C.gold,
-    borderWidth: 2,
-  },
-  rangeCellText: {
-    color: 'rgba(255,255,255,0.82)',
-    fontSize: 7,
-    fontWeight: '900',
-  },
-  rangeCellTextActive: {
-    color: 'white',
   },
 });

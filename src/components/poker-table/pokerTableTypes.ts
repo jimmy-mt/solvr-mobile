@@ -14,4 +14,5 @@ export type PokerTableProps = {
   stackAmounts?: Partial<Record<SeatPosition, number>>;
   cards?: [PlayingCard, PlayingCard] | null;
   theme?: 'green' | 'blue';
+  dealKey?: number | string;
 };
