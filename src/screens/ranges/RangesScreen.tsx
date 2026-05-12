@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { useSQLiteContext } from 'expo-sqlite';
 
-import { RangeGrid, RangeLegend } from '../../components/range-grid/RangeGrid';
+import { RangeLegend } from '../../components/range-grid/RangeGrid';
 import { C } from '../../constants/colors';
 import {
   formatBB,
@@ -53,14 +53,23 @@ const TOP_CONTENT_OFFSET = 58;
 // ─── DB helpers ──────────────────────────────────────────────────────────────
 
 async function loadNode(db: ReturnType<typeof useSQLiteContext>, nodeId: number) {
-  const node = await db.getFirstAsync<NodeRow>('SELECT * FROM nodes WHERE id = ?', [nodeId]);
-  if (!node) return null;
+  const [node, rows, transitions] = await Promise.all([
+    db.getFirstAsync<NodeRow>('SELECT * FROM nodes WHERE id = ?', [nodeId]),
+    db.getAllAsync<HandRow>(
+      `SELECT hand, freq_fold, freq_call, freq_raise, freq_all_in, hand_probability
+       FROM hands WHERE node_id = ? ORDER BY id`,
+      [nodeId],
+    ),
+    db.getAllAsync<TransitionRow>(
+      `SELECT t.action, t.to_node_id, n.proposed_raise_bb
+       FROM transitions t
+       LEFT JOIN nodes n ON n.id = t.to_node_id
+       WHERE t.from_node_id = ?`,
+      [nodeId],
+    ),
+  ]);
 
-  const rows = await db.getAllAsync<HandRow>(
-    `SELECT hand, freq_fold, freq_call, freq_raise, freq_all_in, hand_probability
-     FROM hands WHERE node_id = ? ORDER BY id`,
-    [nodeId],
-  );
+  if (!node) return null;
 
   const hands: Record<string, TrainerHandFrequencies> = {};
   for (const row of rows) {
@@ -75,14 +84,6 @@ async function loadNode(db: ReturnType<typeof useSQLiteContext>, nodeId: number)
       reach: prob,
     };
   }
-
-  const transitions = await db.getAllAsync<TransitionRow>(
-    `SELECT t.action, t.to_node_id, n.proposed_raise_bb
-     FROM transitions t
-     LEFT JOIN nodes n ON n.id = t.to_node_id
-     WHERE t.from_node_id = ?`,
-    [nodeId],
-  );
 
   return { node, hands, transitions };
 }
@@ -152,30 +153,48 @@ function pillStateForPosition(pos: string, spot: TrainerSpot | null): PillState 
 
 // ─── Main screen ─────────────────────────────────────────────────────────────
 
+type NodeData = NonNullable<Awaited<ReturnType<typeof loadNode>>>;
+
 export function RangesScreen() {
   const db = useSQLiteContext();
 
   const [nodeId, setNodeId] = useState(ROOT_NODE_ID);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [nodeData, setNodeData] = useState<Awaited<ReturnType<typeof loadNode>> | null>(null);
+  const [nodeData, setNodeData] = useState<NodeData | null>(null);
   const [loading, setLoading] = useState(true);
   const [selCell, setSelCell] = useState<string | null>(null);
+  const [entranceKey, setEntranceKey] = useState(0);
+
+  // Cache: nodeId → loaded data (avoids re-querying already-visited nodes)
+  const cache = useMemo(() => new Map<number, NodeData>(), [db]);
 
   const spot = useMemo(() => (nodeData ? spotFromNodeRow(nodeData.node) : null), [nodeData]);
   const label = useMemo(() => (spot ? scenarioLabel(spot) : ''), [spot]);
 
+  const loadAndCache = useCallback(
+    async (id: number): Promise<NodeData | null> => {
+      if (cache.has(id)) return cache.get(id)!;
+      const data = await loadNode(db, id);
+      if (data) cache.set(id, data);
+      return data ?? null;
+    },
+    [db, cache],
+  );
+
   const load = useCallback(
     async (id: number) => {
-      setLoading(true);
-      try {
-        const data = await loadNode(db, id);
+      const data = await loadAndCache(id);
+      if (data) {
         setNodeData(data);
         setSelCell(null);
-      } finally {
         setLoading(false);
+        // Prefetch all children in the background
+        for (const t of data.transitions) {
+          loadAndCache(t.to_node_id);
+        }
       }
     },
-    [db],
+    [loadAndCache],
   );
 
   useEffect(() => {
@@ -186,25 +205,49 @@ export function RangesScreen() {
     (action: NavAction) => {
       const t = nodeData?.transitions.find((tr) => tr.action === action);
       if (!t) return;
+      const cached = cache.get(t.to_node_id);
       setHistory((h) => [...h, { nodeId, action }]);
-      setNodeId(t.to_node_id);
+      if (cached) {
+        // Instant swap from cache
+        setNodeData(cached);
+        setSelCell(null);
+        // Prefetch children of this node too
+        for (const child of cached.transitions) {
+          loadAndCache(child.to_node_id);
+        }
+      } else {
+        setNodeId(t.to_node_id);
+      }
     },
-    [nodeData, nodeId],
+    [nodeData, nodeId, cache, loadAndCache],
   );
 
   const goBack = useCallback(() => {
     setHistory((h) => {
       const prev = h[h.length - 1];
       if (!prev) return h;
-      setNodeId(prev.nodeId);
+      const cached = cache.get(prev.nodeId);
+      if (cached) {
+        setNodeData(cached);
+        setSelCell(null);
+      } else {
+        setNodeId(prev.nodeId);
+      }
       return h.slice(0, -1);
     });
-  }, []);
+  }, [cache]);
 
   const reset = useCallback(() => {
     setHistory([]);
-    setNodeId(ROOT_NODE_ID);
-  }, []);
+    const cached = cache.get(ROOT_NODE_ID);
+    if (cached) {
+      setNodeData(cached);
+      setSelCell(null);
+    } else {
+      setNodeId(ROOT_NODE_ID);
+    }
+    setEntranceKey((k) => k + 1);
+  }, [cache]);
 
   const transitions = nodeData?.transitions ?? [];
   const hasBack = history.length > 0;
@@ -263,7 +306,8 @@ export function RangesScreen() {
         {nodeData && (
           <View style={styles.rangePanel}>
             <RangeLegend hands={nodeData.hands} />
-            <RangeGrid
+            <EntranceRangeGrid
+              key={entranceKey}
               hands={nodeData.hands}
               selectedHand={selCell}
               onCellPress={(cell) => setSelCell((prev) => (prev === cell ? null : cell))}
@@ -307,6 +351,114 @@ export function RangesScreen() {
     </View>
   );
 }
+
+// ─── Entrance range grid ──────────────────────────────────────────────────────
+
+const RANKS = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
+
+function cellLabel(rr: string, cr: string, ri: number, ci: number) {
+  if (ri === ci) return rr + cr;
+  if (ri < ci) return rr + cr + 's';
+  return cr + rr + 'o';
+}
+
+function EntranceRangeGrid({
+  hands,
+  selectedHand,
+  onCellPress,
+}: {
+  hands: Record<string, TrainerHandFrequencies>;
+  selectedHand: string | null;
+  onCellPress: (hand: string) => void;
+}) {
+  return (
+    <View style={entranceStyles.grid}>
+      {RANKS.map((rowRank, ri) => (
+        <View key={rowRank} style={entranceStyles.row}>
+          {RANKS.map((colRank, ci) => {
+            const label = cellLabel(rowRank, colRank, ri, ci);
+            const freq = hands[label];
+            const selected = label === selectedHand;
+
+            const segments =
+              freq && freq.possible
+                ? [
+                    { freq: freq.all_in_freq || 0, color: C.allIn },
+                    { freq: freq.raise_freq || 0, color: C.red },
+                    { freq: freq.call_freq || 0, color: C.green },
+                    { freq: freq.fold_freq || 0, color: C.blue },
+                  ].filter((s) => s.freq > 0)
+                : [];
+            const total = segments.reduce((sum, s) => sum + s.freq, 0);
+            const prob = freq?.hand_probability ?? 0;
+            const emptyFrac = 1 - prob / 100;
+
+            return (
+              <Pressable
+                key={label}
+                style={entranceStyles.cellOuter}
+                onPress={() => onCellPress(label)}
+              >
+                <View style={[entranceStyles.cell, selected && entranceStyles.cellSelected]}>
+                  <View style={entranceStyles.segments}>
+                    {segments.length > 0 ? (
+                      <View style={{ flex: 1, flexDirection: 'column' }}>
+                        {emptyFrac > 0 && (
+                          <View style={{ flex: emptyFrac, backgroundColor: '#100c2f' }} />
+                        )}
+                        <View style={{ flex: prob / 100, flexDirection: 'row' }}>
+                          {segments.map((s, i) => (
+                            <View
+                              key={i}
+                              style={{ width: `${(s.freq / total) * 100}%`, backgroundColor: s.color, height: '100%' }}
+                            />
+                          ))}
+                        </View>
+                      </View>
+                    ) : (
+                      <View style={{ flex: 1, backgroundColor: '#100c2f', height: '100%' }} />
+                    )}
+                  </View>
+                  <View style={entranceStyles.textWrapper}>
+                    <Text style={entranceStyles.cellText}>{label}</Text>
+                  </View>
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const entranceStyles = StyleSheet.create({
+  grid: { flexDirection: 'column', gap: 0 },
+  row: { flexDirection: 'row', gap: 0 },
+  cellOuter: { aspectRatio: 1, flex: 1 },
+  cell: {
+    aspectRatio: 1,
+    borderColor: 'transparent',
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  cellSelected: {
+    borderColor: C.purpleLight,
+    borderWidth: 3,
+    margin: -2,
+    zIndex: 1,
+  },
+  segments: { ...StyleSheet.absoluteFillObject, flexDirection: 'row' },
+  textWrapper: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cellText: { color: 'white', fontSize: 7, fontWeight: '900', textAlign: 'center' },
+});
 
 // ─── Cell detail panel ────────────────────────────────────────────────────────
 
