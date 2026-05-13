@@ -396,7 +396,7 @@ export function RangesScreen() {
         {/* Frequency detail — shows selected hand or weighted range aggregate */}
         {detailFreq && (
           <View style={{ marginTop: -6 }}>
-            <CellDetail hand={detailLabel} freq={detailFreq} animationKey={detailAnimKey} />
+            <CellDetail hand={detailLabel} freq={detailFreq} animationKey={detailAnimKey} focused={isFocused} />
           </View>
         )}
 
@@ -606,10 +606,12 @@ const cellDetailSlideEasing = Easing.bezier(0.22, 1, 0.36, 1);
 
 function CellDetail({
   animationKey,
+  focused,
   hand,
   freq,
 }: {
   animationKey: number;
+  focused: boolean;
   hand: string;
   freq: TrainerHandFrequencies;
 }) {
@@ -624,6 +626,11 @@ function CellDetail({
   const revealWidth = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    if (!focused) {
+      revealWidth.setValue(0);
+      return;
+    }
+
     revealWidth.setValue(0);
     const anim = Animated.timing(revealWidth, {
       toValue: 100,
@@ -633,7 +640,7 @@ function CellDetail({
     });
     anim.start();
     return () => anim.stop();
-  }, [animationKey, revealWidth]);
+  }, [animationKey, focused, revealWidth]);
 
   return (
     <View style={styles.cellDetail}>

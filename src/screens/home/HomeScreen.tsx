@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
-import { useFocusEffect } from 'expo-router';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { PokerCard } from '../../components/poker-table/PokerCard';
 import type { PlayingCard } from '../../components/poker-table/pokerTableTypes';
@@ -13,13 +13,29 @@ import {
   type EquityCard,
   type EquityLookupResult,
 } from '../../data/equityDb';
-import { getPerformanceDecisions, type PerformanceDecision } from '../../data/performanceStore';
+import {
+  getPerformanceDecisions,
+  getPerformanceSessions,
+  type PerformanceDecision,
+  type PerformanceSession,
+} from '../../data/performanceStore';
 import type { SpotTypeFilter } from '../../data/trainerDb';
 
 type TimeFilter = '7D' | '30D' | 'ALL';
 type PositionFilter = 'ALL' | 'UTG' | 'HJ' | 'CO' | 'BTN' | 'SB' | 'BB';
 type TableMetric = 'solvr' | 'accuracy';
 type EquityCardSlot = EquityCard | null;
+type SessionSummary = {
+  id: number;
+  startedAt: number;
+  endedAt: number;
+  hands: number;
+  correct: number;
+  accuracy: number | null;
+  score: number | null;
+  decisions: PerformanceDecision[];
+  filterLabel: string;
+};
 
 type GroupStats = {
   key: string;
@@ -56,8 +72,10 @@ const spotLabels: Record<Exclude<SpotTypeFilter, 'ANY'>, string> = {
 };
 
 export function HomeScreen() {
-  const [view, setView] = useState<'home' | 'analytics' | 'equity'>('home');
+  const router = useRouter();
+  const [view, setView] = useState<'home' | 'analytics' | 'equity' | 'sessions'>('home');
   const [decisions, setDecisions] = useState<PerformanceDecision[]>([]);
+  const [performanceSessions, setPerformanceSessions] = useState<PerformanceSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('30D');
   const [spotFilter, setSpotFilter] = useState<SpotTypeFilter>('ANY');
@@ -69,12 +87,18 @@ export function HomeScreen() {
   const loadScores = useCallback(() => {
     let active = true;
     setLoading(true);
-    getPerformanceDecisions()
-      .then((rows) => {
-        if (active) setDecisions(rows);
+    Promise.all([getPerformanceDecisions(), getPerformanceSessions()])
+      .then(([decisionRows, sessionRows]) => {
+        if (active) {
+          setDecisions(decisionRows);
+          setPerformanceSessions(sessionRows);
+        }
       })
       .catch(() => {
-        if (active) setDecisions([]);
+        if (active) {
+          setDecisions([]);
+          setPerformanceSessions([]);
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -122,6 +146,7 @@ export function HomeScreen() {
     return positions.map((position) => summarizeRows(position, position, decisions.filter((decision) => decision.hero_position === position)));
   }, [decisions]);
   const allTimeOverall = useMemo(() => summarizeRows('overall', 'Overall', decisions), [decisions]);
+  const sessions = useMemo(() => buildSessionSummaries(decisions, performanceSessions), [decisions, performanceSessions]);
 
   if (view === 'analytics') {
     return (
@@ -154,11 +179,14 @@ export function HomeScreen() {
     return <EquityCalculatorView onBack={() => setView('home')} />;
   }
 
+  if (view === 'sessions') {
+    return <SessionsView loading={loading} sessions={sessions} onBack={() => setView('home')} />;
+  }
+
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.homeContent} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
-        <Text style={styles.title}>Home</Text>
-        <Text style={styles.subtitle}>Your training data lives here.</Text>
+        <Text style={styles.title}>Solvr</Text>
       </View>
 
       <Pressable
@@ -188,6 +216,41 @@ export function HomeScreen() {
           </View>
         </View>
         <Text style={styles.cardTapHint}>Compare two exact hands using preflop equity data</Text>
+      </Pressable>
+
+      <Pressable
+        onPress={() => setView('sessions')}
+        style={({ pressed }) => [styles.sessionsCard, pressed && styles.analyticsCardPressed]}
+      >
+        <View style={styles.cardTopRow}>
+          <Text style={styles.cardEyebrow}>Sessions</Text>
+          <View style={styles.cardCtaPill}>
+            <Text style={styles.cardCtaText}>Open</Text>
+            <Text style={styles.cardCtaArrow}>{'>'}</Text>
+          </View>
+        </View>
+        <View style={styles.sessionPreviewStats}>
+          <View style={styles.sessionPreviewStat}>
+            <Text style={styles.sessionPreviewValue}>{sessions.length}</Text>
+            <Text style={styles.sessionPreviewLabel}>Sessions</Text>
+          </View>
+          <View style={styles.sessionPreviewStat}>
+            <Text style={styles.sessionPreviewValue}>{decisions.length}</Text>
+            <Text style={styles.sessionPreviewLabel}>Hands</Text>
+          </View>
+          <View style={styles.sessionPreviewStat}>
+            <Text style={styles.sessionPreviewValue}>{formatScore(allTimeOverall.score)}</Text>
+            <Text style={styles.sessionPreviewLabel}>Solvr</Text>
+          </View>
+        </View>
+        <Text style={styles.cardTapHint}>Review session filters, accuracy, and Solvr scores</Text>
+      </Pressable>
+
+      <Pressable
+        onPress={() => router.push('/train')}
+        style={({ pressed }) => [styles.startTrainingButton, pressed && styles.analyticsCardPressed]}
+      >
+        <Text style={styles.startTrainingText}>Start Training</Text>
       </Pressable>
     </ScrollView>
   );
@@ -301,6 +364,135 @@ function AnalyticsView({
   );
 }
 
+function SessionsView({
+  loading,
+  sessions,
+  onBack,
+}: {
+  loading: boolean;
+  sessions: SessionSummary[];
+  onBack: () => void;
+}) {
+  const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);
+  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
+
+  if (selectedSession) {
+    return (
+      <SessionDetailView
+        session={selectedSession}
+        onBack={() => setSelectedSessionId(null)}
+      />
+    );
+  }
+
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <View style={styles.analyticsHeader}>
+        <Pressable onPress={onBack} style={styles.backButton}>
+          <Text style={styles.backText}>‹ Back</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.sessionsHeader}>
+        <Text style={styles.equityTitle}>Sessions</Text>
+        <Text style={styles.sessionsSubtitle}>Review session filters, accuracy, and Solvr score.</Text>
+      </View>
+
+      {loading ? (
+        <Text style={styles.emptyText}>Loading sessions...</Text>
+      ) : sessions.length === 0 ? (
+        <Text style={styles.emptyText}>No sessions yet. Train a few hands and they will appear here.</Text>
+      ) : (
+        <View style={styles.sessionList}>
+          {sessions.map((session) => (
+            <SessionCard key={session.id} session={session} onPress={() => setSelectedSessionId(session.id)} />
+          ))}
+        </View>
+      )}
+    </ScrollView>
+  );
+}
+
+function SessionCard({ session, onPress }: { session: SessionSummary; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.sessionCard, pressed && styles.analyticsCardPressed]}>
+      {session.filterLabel ? <Text style={styles.sessionMeta}>{session.filterLabel}</Text> : null}
+      <View style={styles.sessionStatRow}>
+        <View style={styles.sessionStat}>
+          <Text style={styles.sessionStatValue}>{session.hands}</Text>
+          <Text style={styles.sessionStatLabel}>Hands</Text>
+        </View>
+        <View style={styles.sessionStat}>
+          <Text style={styles.sessionStatValue}>{formatAccuracy(session.accuracy)}</Text>
+          <Text style={styles.sessionStatLabel}>Accuracy</Text>
+        </View>
+        <View style={styles.sessionStat}>
+          <Text style={styles.sessionStatValue}>{formatScore(session.score)}</Text>
+          <Text style={styles.sessionStatLabel}>Solvr</Text>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+function SessionDetailView({ session, onBack }: { session: SessionSummary; onBack: () => void }) {
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <View style={styles.analyticsHeader}>
+        <Pressable onPress={onBack} style={styles.backButton}>
+          <Text style={styles.backText}>‹ Sessions</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.sessionsHeader}>
+        <Text style={styles.equityTitle}>Session Details</Text>
+        {session.filterLabel ? <Text style={styles.sessionsSubtitle}>{session.filterLabel}</Text> : null}
+      </View>
+
+      <View style={styles.sessionStatRow}>
+        <View style={styles.sessionStat}>
+          <Text style={styles.sessionStatValue}>{formatScore(session.score)}</Text>
+          <Text style={styles.sessionStatLabel}>Solvr</Text>
+        </View>
+        <View style={styles.sessionStat}>
+          <Text style={styles.sessionStatValue}>{formatAccuracy(session.accuracy)}</Text>
+          <Text style={styles.sessionStatLabel}>Accuracy</Text>
+        </View>
+        <View style={styles.sessionStat}>
+          <Text style={styles.sessionStatValue}>{session.correct}/{session.hands}</Text>
+          <Text style={styles.sessionStatLabel}>Correct</Text>
+        </View>
+      </View>
+
+      <View style={styles.handLogList}>
+        {session.decisions.map((decision) => (
+          <HandLogRow key={decision.id} decision={decision} />
+        ))}
+      </View>
+    </ScrollView>
+  );
+}
+
+function HandLogRow({ decision }: { decision: PerformanceDecision }) {
+  const correct = Boolean(decision.was_correct);
+  const expected = decision.dominant_action ?? 'Mixed';
+
+  return (
+    <View style={styles.handLogRow}>
+      <View style={styles.handLogMain}>
+        <Text style={styles.handLogTitle}>{decision.hand_class} · {handContext(decision)}</Text>
+        <Text style={styles.handLogDetail}>
+          Chose {decision.action_taken} · Solver {expected} · {decision.chosen_freq.toFixed(0)}% chosen freq
+        </Text>
+      </View>
+      <View style={[styles.handResultPill, correct ? styles.handResultCorrect : styles.handResultMiss]}>
+        <Text style={styles.handResultText}>{correct ? 'Right' : 'Miss'}</Text>
+        <Text style={styles.handResultScore}>{formatScore(decision.solvr_score)}</Text>
+      </View>
+    </View>
+  );
+}
+
 function EquityCalculatorView({ onBack }: { onBack: () => void }) {
   const [player1, setPlayer1] = useState<[EquityCardSlot, EquityCardSlot]>([null, null]);
   const [player2, setPlayer2] = useState<[EquityCardSlot, EquityCardSlot]>([null, null]);
@@ -310,6 +502,7 @@ function EquityCalculatorView({ onBack }: { onBack: () => void }) {
   const [loadingEquity, setLoadingEquity] = useState(false);
   const [pendingRank, setPendingRank] = useState<CardRank | null>(null);
   const [pendingSuit, setPendingSuit] = useState<CardSuit | null>(null);
+  const [showEquityInfo, setShowEquityInfo] = useState(false);
 
   const allCards: EquityCardSlot[] = [...player1, ...player2];
   const pendingCard = {
@@ -431,8 +624,21 @@ function EquityCalculatorView({ onBack }: { onBack: () => void }) {
       </View>
 
       <View style={styles.equityPanel}>
-        <Text style={styles.equityTitle}>Equity Calculator</Text>
-        <Text style={styles.equitySubtitle}>Select exact hole cards. Hands are canonicalized before querying equity_table.db.</Text>
+        <View style={styles.equityTitleRow}>
+          <Text style={styles.equityTitle}>Equity Calculator</Text>
+          <Pressable onPress={() => setShowEquityInfo(true)} style={styles.equityInfoButton}>
+            <Text style={styles.equityInfoButtonText}>?</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.equityActionsRow}>
+          <Pressable onPress={randomFill} style={styles.secondaryEquityButton}>
+            <Text style={styles.secondaryEquityButtonText}>Random</Text>
+          </Pressable>
+          <Pressable onPress={clearCards} style={styles.secondaryEquityButton}>
+            <Text style={styles.secondaryEquityButtonText}>Clear</Text>
+          </Pressable>
+        </View>
 
         <View style={styles.handSelectorRow}>
           <EquityHandCards
@@ -520,15 +726,6 @@ function EquityCalculatorView({ onBack }: { onBack: () => void }) {
           </View>
         </View>
 
-        <View style={styles.equityActionsRow}>
-          <Pressable onPress={randomFill} style={styles.secondaryEquityButton}>
-            <Text style={styles.secondaryEquityButtonText}>Random</Text>
-          </Pressable>
-          <Pressable onPress={clearCards} style={styles.secondaryEquityButton}>
-            <Text style={styles.secondaryEquityButtonText}>Clear</Text>
-          </Pressable>
-        </View>
-
         <Pressable
           disabled={loadingEquity || duplicate || incomplete}
           onPress={runLookup}
@@ -557,6 +754,27 @@ function EquityCalculatorView({ onBack }: { onBack: () => void }) {
           <Text style={styles.emptyText}>Select four cards, then calculate equity.</Text>
         )}
       </View>
+
+      <Modal
+        animationType="fade"
+        transparent
+        visible={showEquityInfo}
+        onRequestClose={() => setShowEquityInfo(false)}
+      >
+        <Pressable style={styles.infoModalBackdrop} onPress={() => setShowEquityInfo(false)}>
+          <Pressable style={styles.infoModalCard}>
+            <View style={styles.infoModalHeader}>
+              <Text style={styles.infoModalTitle}>Equity Calculator</Text>
+              <Pressable onPress={() => setShowEquityInfo(false)} style={styles.infoModalClose}>
+                <Text style={styles.infoModalCloseText}>x</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.infoModalText}>
+              Select exact hole cards for Hero and Villain. Hands are canonicalized before querying equity_table.db.
+            </Text>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </ScrollView>
   );
 }
@@ -584,7 +802,11 @@ function EquityHandCards({
             <Pressable
               key={slot}
               onPress={() => onSelect(slot)}
-              style={[styles.equityCardFace, activeOffset === slot && styles.equityCardFaceActive]}
+              style={[
+                styles.equityCardFace,
+                !card && styles.equityCardFaceEmpty,
+                activeOffset === slot && styles.equityCardFaceActive,
+              ]}
             >
               {card ? (
                 <PokerCard
@@ -618,11 +840,20 @@ function EquityResultCard({
   lose: number;
   tie: number;
 }) {
+  const winShare = Math.max(0, Math.min(1, win));
+  const tieShare = Math.max(0, Math.min(1, tie));
+  const loseShare = Math.max(0, Math.min(1, lose));
+
   return (
     <View style={styles.equityResultCard}>
       <View style={styles.equityResultHeader}>
         <Text style={styles.equityResultLabel}>{label}</Text>
         <Text style={styles.equityResultHand}>{hand} vs {opponent}</Text>
+      </View>
+      <View style={styles.equityBar}>
+        <View style={[styles.equityBarSegment, styles.equityBarWin, { flex: winShare }]} />
+        <View style={[styles.equityBarSegment, styles.equityBarTie, { flex: tieShare }]} />
+        <View style={[styles.equityBarSegment, styles.equityBarLose, { flex: loseShare }]} />
       </View>
       <View style={styles.equityMetricRow}>
         <View style={styles.equityMetric}>
@@ -857,6 +1088,54 @@ function ScoreCard({ stats, summary }: { stats: GroupStats; summary: string }) {
   );
 }
 
+function buildSessionSummaries(rows: PerformanceDecision[], sessionRows: PerformanceSession[]): SessionSummary[] {
+  const bySession = new Map<number, PerformanceDecision[]>();
+  for (const row of rows) {
+    bySession.set(row.session_id, [...(bySession.get(row.session_id) || []), row]);
+  }
+  const sessionMeta = new Map(sessionRows.map((session) => [session.id, session]));
+
+  return Array.from(bySession.entries())
+    .map(([id, decisionRows]) => {
+      const meta = sessionMeta.get(id);
+      const orderedRows = [...decisionRows].sort((a, b) => a.timestamp - b.timestamp);
+      const stats = summarizeRows(String(id), `Session ${id}`, orderedRows);
+      return {
+        id,
+        startedAt: meta?.started_at ?? orderedRows[0]?.timestamp ?? 0,
+        endedAt: meta?.ended_at ?? orderedRows[orderedRows.length - 1]?.timestamp ?? orderedRows[0]?.timestamp ?? 0,
+        hands: stats.hands,
+        correct: stats.correct,
+        accuracy: stats.accuracy,
+        score: stats.score,
+        decisions: orderedRows,
+        filterLabel: sessionFilterLabel(meta),
+      };
+    })
+    .sort((a, b) => b.startedAt - a.startedAt);
+}
+
+function sessionFilterLabel(session: PerformanceSession | undefined) {
+  if (!session) return '';
+  const filters: string[] = [];
+  if (session.spot_type_filter !== 'ANY') {
+    filters.push(spotLabels[session.spot_type_filter as Exclude<SpotTypeFilter, 'ANY'>] ?? session.spot_type_filter);
+  }
+
+  let positionsFilter: string[] = [];
+  try {
+    const parsed = JSON.parse(session.position_filter);
+    if (Array.isArray(parsed)) positionsFilter = parsed.filter((item): item is string => typeof item === 'string');
+  } catch {
+    positionsFilter = [];
+  }
+  if (positionsFilter.length > 0 && positionsFilter.length < positions.length) {
+    filters.push(positionsFilter.join(', '));
+  }
+
+  return filters.length > 0 ? filters.join(' · ') : '';
+}
+
 function summarizeRows(key: string, label: string, rows: PerformanceDecision[]): GroupStats {
   const scoreTotal = rows.reduce((sum, row) => sum + clampScore(row.solvr_score), 0);
   const correct = rows.reduce((sum, row) => sum + (row.was_correct ? 1 : 0), 0);
@@ -907,48 +1186,11 @@ function weakestSpotType(rows: PerformanceDecision[]) {
   return groups[0]?.label;
 }
 
-function buildWorstHands(rows: PerformanceDecision[]) {
-  const groups = new Map<string, PerformanceDecision[]>();
-  for (const row of rows) {
-    const key = `${row.hand_class}|${row.spot_type}|${row.hero_position}|${row.opener_position || ''}`;
-    groups.set(key, [...(groups.get(key) || []), row]);
-  }
-
-  return Array.from(groups.entries())
-    .map(([key, groupRows]) => {
-      const first = groupRows[0];
-      const stats = summarizeRows(key, first.hand_class, groupRows);
-      return {
-        ...stats,
-        hand: first.hand_class,
-        context: handContext(first),
-        mistake: mistakeLabel(groupRows),
-      };
-    })
-    .filter((group) => group.hands >= 2)
-    .sort((a, b) => Number(a.score) - Number(b.score))
-    .slice(0, 12);
-}
-
 function handContext(row: PerformanceDecision) {
   if (row.spot_type === 'RFI') return `${row.hero_position} RFI`;
   if (row.spot_type === 'VO') return `${row.hero_position} vs ${row.opener_position} Open`;
   if (row.spot_type === 'V3B') return `${row.hero_position} vs ${row.opener_position} Open`;
   return `${row.hero_position} vs ${row.opener_position} 4Bet pot`;
-}
-
-function mistakeLabel(rows: PerformanceDecision[]) {
-  const mistakes = rows.filter((row) => row.action_taken !== row.dominant_action);
-  if (mistakes.length === 0) return null;
-  const counts = mistakes.reduce<Record<string, number>>((acc, row) => {
-    acc[row.action_taken] = (acc[row.action_taken] || 0) + 1;
-    return acc;
-  }, {});
-  const [action] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] || [];
-  if (action === 'Call') return 'Mostly overcalled';
-  if (action === 'Raise' || action === 'All-in') return 'Pushed too often';
-  if (action === 'Fold') return 'Missed continues';
-  return null;
 }
 
 function summaryLine(stats: GroupStats) {
@@ -1054,6 +1296,7 @@ const styles = StyleSheet.create({
     paddingTop: 48,
   },
   header: {
+    alignItems: 'center',
     gap: 6,
   },
   analyticsHeader: {
@@ -1067,11 +1310,31 @@ const styles = StyleSheet.create({
     fontSize: 30,
     fontWeight: '900',
     letterSpacing: 0,
+    textAlign: 'center',
   },
   subtitle: {
     color: C.textSec,
     fontSize: 15,
     lineHeight: 21,
+  },
+  startTrainingButton: {
+    alignItems: 'center',
+    backgroundColor: C.purple,
+    borderColor: C.purpleLight,
+    borderRadius: 14,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 78,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    width: '100%',
+  },
+  startTrainingText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: '900',
+    textAlign: 'center',
+    textTransform: 'uppercase',
   },
   analyticsCard: {
     alignItems: 'center',
@@ -1151,6 +1414,41 @@ const styles = StyleSheet.create({
     gap: 10,
     minHeight: 96,
     padding: 16,
+  },
+  sessionsCard: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(24,16,46,0.78)',
+    borderColor: 'rgba(196,181,253,0.28)',
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 12,
+    minHeight: 142,
+    padding: 16,
+  },
+  sessionPreviewStats: {
+    flexDirection: 'row',
+    gap: 8,
+    width: '100%',
+  },
+  sessionPreviewStat: {
+    alignItems: 'center',
+    backgroundColor: C.surface2,
+    borderColor: C.border,
+    borderRadius: 10,
+    borderWidth: 1,
+    flex: 1,
+    paddingVertical: 9,
+  },
+  sessionPreviewValue: {
+    color: C.text,
+    fontSize: 19,
+    fontWeight: '900',
+  },
+  sessionPreviewLabel: {
+    color: C.textMuted,
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
   },
   miniTable: {
     backgroundColor: '#1a5c24',
@@ -1304,23 +1602,157 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     paddingLeft: 12,
   },
+  sessionsHeader: {
+    gap: 5,
+  },
+  sessionsSubtitle: {
+    color: C.textSec,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  sessionList: {
+    gap: 12,
+  },
+  sessionCard: {
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    gap: 8,
+    padding: 10,
+  },
+  sessionCardHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between',
+  },
+  sessionHeaderText: {
+    flex: 1,
+    gap: 3,
+  },
+  sessionTitle: {
+    color: C.text,
+    fontSize: 17,
+    fontWeight: '900',
+  },
+  sessionMeta: {
+    color: C.textSec,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  sessionStatRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  sessionStat: {
+    alignItems: 'center',
+    backgroundColor: C.surface2,
+    borderRadius: 10,
+    flex: 1,
+    paddingVertical: 7,
+  },
+  sessionStatValue: {
+    color: C.text,
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  sessionStatLabel: {
+    color: C.textMuted,
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  handLogList: {
+    gap: 8,
+  },
+  handLogRow: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(34, 21, 64, 0.56)',
+    borderColor: 'rgba(196, 181, 253, 0.14)',
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    padding: 10,
+  },
+  handLogMain: {
+    flex: 1,
+    gap: 3,
+  },
+  handLogTitle: {
+    color: C.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  handLogDetail: {
+    color: C.textSec,
+    fontSize: 11,
+    fontWeight: '800',
+    lineHeight: 15,
+  },
+  handResultPill: {
+    alignItems: 'center',
+    borderRadius: 9,
+    minWidth: 54,
+    paddingHorizontal: 7,
+    paddingVertical: 6,
+  },
+  handResultCorrect: {
+    backgroundColor: 'rgba(34, 197, 94, 0.24)',
+  },
+  handResultMiss: {
+    backgroundColor: 'rgba(240, 69, 69, 0.28)',
+  },
+  handResultText: {
+    color: C.text,
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  handResultScore: {
+    color: C.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  sessionMoreText: {
+    color: C.textMuted,
+    fontSize: 12,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
   equityPanel: {
     backgroundColor: C.surface,
     borderColor: C.border,
     borderRadius: 16,
     borderWidth: 1,
-    gap: 16,
+    gap: 12,
     padding: 14,
+  },
+  equityTitleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
   },
   equityTitle: {
     color: C.text,
     fontSize: 24,
     fontWeight: '900',
   },
-  equitySubtitle: {
-    color: C.textSec,
-    fontSize: 13,
-    lineHeight: 19,
+  equityInfoButton: {
+    alignItems: 'center',
+    backgroundColor: C.surface2,
+    borderColor: C.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    height: 28,
+    justifyContent: 'center',
+    width: 28,
+  },
+  equityInfoButtonText: {
+    color: C.purplePale,
+    fontSize: 15,
+    fontWeight: '900',
   },
   handSelectorRow: {
     alignItems: 'center',
@@ -1356,6 +1788,11 @@ const styles = StyleSheet.create({
   },
   equityCardFaceActive: {
     borderColor: C.gold,
+  },
+  equityCardFaceEmpty: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderColor: 'rgba(255, 255, 255, 0.32)',
+    borderStyle: 'dashed',
   },
   emptyCardText: {
     color: C.textMuted,
@@ -1437,6 +1874,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   equityActionsRow: {
+    alignSelf: 'flex-end',
     flexDirection: 'row',
     gap: 8,
   },
@@ -1444,15 +1882,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: C.surface2,
     borderColor: C.border,
-    borderRadius: 12,
+    borderRadius: 8,
     borderWidth: 1,
-    flex: 1,
-    paddingVertical: 11,
+    minWidth: 74,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
   },
   secondaryEquityButtonText: {
     color: C.textSec,
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '900',
+    textTransform: 'uppercase',
   },
   calculateButton: {
     alignItems: 'center',
@@ -1497,6 +1937,26 @@ const styles = StyleSheet.create({
     fontSize: 19,
     fontWeight: '900',
   },
+  equityBar: {
+    backgroundColor: C.surface2,
+    borderRadius: 999,
+    flexDirection: 'row',
+    height: 14,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  equityBarSegment: {
+    height: '100%',
+  },
+  equityBarWin: {
+    backgroundColor: C.green,
+  },
+  equityBarTie: {
+    backgroundColor: C.gold,
+  },
+  equityBarLose: {
+    backgroundColor: C.red,
+  },
   equityMetricRow: {
     flexDirection: 'row',
     gap: 8,
@@ -1519,6 +1979,53 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '900',
     textTransform: 'uppercase',
+  },
+  infoModalBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(7, 4, 16, 0.72)',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 24,
+  },
+  infoModalCard: {
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    gap: 12,
+    maxWidth: 360,
+    padding: 16,
+    width: '100%',
+  },
+  infoModalHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  infoModalTitle: {
+    color: C.text,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  infoModalClose: {
+    alignItems: 'center',
+    backgroundColor: C.surface2,
+    borderColor: C.border,
+    borderRadius: 13,
+    borderWidth: 1,
+    height: 26,
+    justifyContent: 'center',
+    width: 26,
+  },
+  infoModalCloseText: {
+    color: C.textSec,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  infoModalText: {
+    color: C.textSec,
+    fontSize: 13,
+    lineHeight: 19,
   },
   canonicalKey: {
     color: C.textMuted,

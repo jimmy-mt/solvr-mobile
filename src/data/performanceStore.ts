@@ -297,3 +297,13 @@ export async function getPerformanceDecisions() {
      ORDER BY timestamp DESC`,
   );
 }
+
+export async function getPerformanceSessions() {
+  await ensurePerformanceStore();
+  const db = await getPerformanceDb();
+  return db.getAllAsync<PerformanceSession>(
+    `SELECT *
+     FROM performance_sessions
+     ORDER BY started_at DESC`,
+  );
+}
