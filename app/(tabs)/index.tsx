@@ -1,5 +1,5 @@
-import { PlaceholderScreen } from '../../src/components/PlaceholderScreen';
+import { HomeScreen } from '../../src/screens/home/HomeScreen';
 
 export default function HomeTab() {
-  return <PlaceholderScreen title="Home" subtitle="Stats and session overview will live here." />;
+  return <HomeScreen />;
 }

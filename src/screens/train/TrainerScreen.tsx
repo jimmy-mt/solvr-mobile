@@ -1,7 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  ActivityIndicator,
   Animated,
   Easing,
   Platform,
@@ -16,10 +15,12 @@ import { useSQLiteContext } from 'expo-sqlite';
 
 import { PokerTable } from '../../components/poker-table/PokerTable';
 import { pokerTablePropsFromSpot } from '../../components/poker-table/trainerTableAdapter';
+import type { PokerTableProps } from '../../components/poker-table/pokerTableTypes';
 import { RangeGrid, RangeLegend } from '../../components/range-grid/RangeGrid';
 import { C } from '../../constants/colors';
 import {
   availableActionsForSpot,
+  computeSolvrScore,
   dealRandomTrainerHand,
   formatBB,
   getActionFrequency,
@@ -28,6 +29,12 @@ import {
   type TrainerAction,
   type TrainerDeal,
 } from '../../data/trainerDb';
+import {
+  endPerformanceSession,
+  ensurePerformanceStore,
+  savePerformanceDecision,
+  startPerformanceSession,
+} from '../../data/performanceStore';
 
 const spotFilters: Array<{ label: string; value: SpotTypeFilter }> = [
   { label: 'Any', value: 'ANY' },
@@ -40,6 +47,14 @@ const spotFilters: Array<{ label: string; value: SpotTypeFilter }> = [
 const allPositions = ['UTG', 'HJ', 'CO', 'BTN', 'SB', 'BB'];
 const ranks = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
 const TOP_CONTENT_OFFSET = 58;
+const DEFAULT_TABLE_PROPS: PokerTableProps = {
+  heroPos: 'BTN',
+  openerPos: null,
+  foldedPositions: ['UTG', 'HJ', 'CO'],
+  blindAmounts: { SB: 0.5, BB: 1 },
+  cards: null,
+};
+const FALLBACK_ACTIONS: TrainerAction[] = ['Fold', 'Call', 'Raise'];
 
 export function TrainerScreen() {
   const db = useSQLiteContext();
@@ -50,17 +65,17 @@ export function TrainerScreen() {
   const [testMode, setTestMode] = useState(false);
   const [phase, setPhase] = useState<'quiz' | 'result'>('quiz');
   const [deal, setDeal] = useState<TrainerDeal | null>(null);
+  const [handLoading, setHandLoading] = useState(false);
   const [picked, setPicked] = useState<TrainerAction | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState({ correct: 0, total: 0 });
   const [solvrScore, setSolvrScore] = useState<{ sum: number; count: number }>({ sum: 0, count: 0 });
   const [lastHandScore, setLastHandScore] = useState<number | null>(null);
+  const [sessionId, setSessionId] = useState<number | null>(null);
   const [dealKey, setDealKey] = useState(0);
   const [showHint, setShowHint] = useState(false);
   const [hintClosing, setHintClosing] = useState(false);
   const [filtersClosing, setFiltersClosing] = useState(false);
-  const hasLoadedRef = useRef(false);
   const hintCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filtersCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -71,9 +86,22 @@ export function TrainerScreen() {
     };
   }, []);
 
+  const beginSession = useCallback(async () => {
+    await ensurePerformanceStore();
+    const nextSessionId = await startPerformanceSession({
+      spotTypeFilter,
+      positionFilter: posFilter,
+    });
+    setSessionId(nextSessionId);
+    return nextSessionId;
+  }, [posFilter, spotTypeFilter]);
+
+  useEffect(() => {
+    beginSession().catch(() => {});
+  }, [beginSession]);
+
   const loadHand = useCallback(async () => {
-    const isInitialLoad = !hasLoadedRef.current;
-    setIsLoading(isInitialLoad);
+    setHandLoading(true);
     setError(null);
     try {
       const nextDeal = await dealRandomTrainerHand(db, spotTypeFilter, posFilter);
@@ -91,8 +119,7 @@ export function TrainerScreen() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load trainer.db.');
     } finally {
-      hasLoadedRef.current = true;
-      setIsLoading(false);
+      setHandLoading(false);
     }
   }, [db, posFilter, spotTypeFilter]);
 
@@ -121,6 +148,28 @@ export function TrainerScreen() {
       total: current.total + 1,
     }));
     setSolvrScore((current) => ({ sum: current.sum + score, count: current.count + 1 }));
+    const currentSessionId = sessionId;
+    const persistDecision = currentSessionId
+      ? Promise.resolve(currentSessionId)
+      : beginSession();
+    persistDecision
+      .then((id) =>
+        savePerformanceDecision(id, {
+          deal,
+          action,
+          wasCorrect: correct,
+          solvrScore: score,
+        }),
+      )
+      .catch(() => {});
+  }
+
+  function resetSessionStats() {
+    endPerformanceSession(sessionId).catch(() => {});
+    setStats({ correct: 0, total: 0 });
+    setSolvrScore({ sum: 0, count: 0 });
+    setLastHandScore(null);
+    beginSession().catch(() => {});
   }
 
   function changeFilter(filter: SpotTypeFilter) {
@@ -172,7 +221,9 @@ export function TrainerScreen() {
   const accuracy = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
   const sessionSolvr = solvrScore.count > 0 ? Math.round((solvrScore.sum / solvrScore.count) * 100) : null;
   const filterActive = testMode || wrongPracticeMode || posFilter.length > 0 || spotTypeFilter !== 'ANY';
-  const availableActions = deal ? availableActionsForSpot(deal.hands) : [];
+  const availableActions = deal ? availableActionsForSpot(deal.hands) : FALLBACK_ACTIONS;
+  const tableProps = deal ? pokerTablePropsFromSpot(deal.spot, deal.hand) : DEFAULT_TABLE_PROPS;
+  const showQuizChrome = phase !== 'result';
   const overlayTop =
     (Platform.OS === 'android' ? NativeStatusBar.currentHeight ?? 0 : 0) +
     TOP_CONTENT_OFFSET +
@@ -186,10 +237,10 @@ export function TrainerScreen() {
         contentContainerStyle={styles.screenContent}
         showsVerticalScrollIndicator={false}
       >
-        {phase !== 'result' && <View style={styles.filterHeader}>
+        {showQuizChrome && <View style={styles.filterHeader}>
         <Pressable
           onPress={() => {
-            if (!deal || isLoading || error) return;
+            if (!deal || error) return;
             if (showHint) closeHint();
             else openHint();
           }}
@@ -223,7 +274,7 @@ export function TrainerScreen() {
                   {stats.correct}/{stats.total} - {accuracy}%{sessionSolvr !== null ? ` · S ${sessionSolvr}` : ''}
                 </Text>
               </View>
-              <Pressable onPress={() => { setStats({ correct: 0, total: 0 }); setSolvrScore({ sum: 0, count: 0 }); setLastHandScore(null); }} style={styles.smallHeaderButton}>
+              <Pressable onPress={resetSessionStats} style={styles.smallHeaderButton}>
                 <Text style={styles.smallHeaderButtonText}>New Session</Text>
               </Pressable>
             </>
@@ -233,7 +284,7 @@ export function TrainerScreen() {
         <AnimatedFiltersButton active={filterActive} onPress={toggleFilters} />
       </View>}
 
-        {phase !== 'result' && <View style={styles.progressTrack}>
+        {showQuizChrome && <View style={styles.progressTrack}>
           <View
             style={[
               styles.progressFill,
@@ -245,12 +296,7 @@ export function TrainerScreen() {
           />
         </View>}
 
-        {isLoading ? (
-        <View style={styles.statePanel}>
-          <ActivityIndicator color={C.purpleLight} />
-          <Text style={styles.stateText}>Loading trainer.db...</Text>
-        </View>
-      ) : error ? (
+        {error ? (
         <View style={styles.statePanel}>
           <Text style={styles.errorText}>{error}</Text>
           <Pressable onPress={loadHand} style={styles.primaryButton}>
@@ -267,7 +313,7 @@ export function TrainerScreen() {
       ) : deal ? (
         <>
           <View style={styles.tableStage}>
-            <PokerTable {...pokerTablePropsFromSpot(deal.spot, deal.hand)} dealKey={dealKey} />
+            <PokerTable {...tableProps} dealKey={dealKey} />
           </View>
 
           <View style={styles.actionDock}>
@@ -277,21 +323,43 @@ export function TrainerScreen() {
                 return (
                   <Pressable
                     key={action}
+                    disabled={!deal || handLoading}
                     onPress={() => answer(action)}
                     style={[
                       styles.actionButton,
                       actionStyle(action),
                       active && styles.actionButtonPicked,
+                      (!deal || handLoading) && styles.actionButtonDisabled,
                     ]}
                   >
-                    <Text style={styles.actionText}>{actionLabel(action, deal.spot.raiseBB)}</Text>
+                    <Text style={styles.actionText}>{actionLabel(action, deal?.spot.raiseBB ?? 0)}</Text>
                   </Pressable>
                 );
               })}
             </View>
           </View>
         </>
-      ) : null}
+      ) : (
+        <>
+          <View style={styles.tableStage}>
+            <PokerTable {...tableProps} dealKey="initial" />
+          </View>
+
+          <View style={styles.actionDock}>
+            <View style={styles.actionGrid}>
+              {availableActions.map((action) => (
+                <Pressable
+                  key={action}
+                  disabled
+                  style={[styles.actionButton, actionStyle(action), styles.actionButtonDisabled]}
+                >
+                  <Text style={styles.actionText}>{actionLabel(action, 0)}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        </>
+      )}
       </ScrollView>
 
       {showFilters && (
@@ -839,21 +907,6 @@ function actionLabel(action: TrainerAction, raiseBB: number) {
 }
 
 
-function computeSolvrScore(action: TrainerAction, handFreq: TrainerDeal['handFreq']): number {
-  const strategy = {
-    fold: handFreq.fold_freq,
-    call: handFreq.call_freq,
-    raise: handFreq.raise_freq,
-    all_in: handFreq.all_in_freq,
-  };
-  const actionKey = action === 'All-in' ? 'all_in' : (action.toLowerCase() as keyof typeof strategy);
-  const chosenFreq = strategy[actionKey] ?? 0;
-  if (chosenFreq === 0) return 0;
-  const dominantFreq = Math.max(...Object.values(strategy));
-  const deviation = Math.max(0, dominantFreq - chosenFreq);
-  return Math.max(0, Math.min(1, 1 - Math.pow(deviation / 100, 4)));
-}
-
 function actionStyle(action: TrainerAction) {
   if (action === 'Fold') return styles.foldButton;
   if (action === 'Call') return styles.callButton;
@@ -1334,6 +1387,9 @@ const styles = StyleSheet.create({
   actionButtonPicked: {
     borderColor: C.gold,
     borderWidth: 2,
+  },
+  actionButtonDisabled: {
+    opacity: 0.48,
   },
   actionText: {
     color: 'white',

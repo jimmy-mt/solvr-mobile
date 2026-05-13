@@ -68,10 +68,9 @@ export async function dealRandomTrainerHand(
   spotTypeFilter: SpotTypeFilter,
   heroPositions: string[] = [],
 ): Promise<TrainerDeal | null> {
-  const nodeIds = await getNodeIds(db, layersForFilter(spotTypeFilter), heroPositions);
-  if (nodeIds.length === 0) return null;
+  const nodeId = await getRandomNodeId(db, layersForFilter(spotTypeFilter), heroPositions);
+  if (nodeId == null) return null;
 
-  const nodeId = nodeIds[Math.floor(Math.random() * nodeIds.length)];
   const loaded = await loadNodeById(db, nodeId);
   if (!loaded) return null;
 
@@ -86,7 +85,7 @@ export async function dealRandomTrainerHand(
   };
 }
 
-async function getNodeIds(
+async function getRandomNodeId(
   db: SQLiteDatabase,
   layers: number[],
   heroPositions: string[],
@@ -101,8 +100,10 @@ async function getNodeIds(
     params.push(...heroPositions);
   }
 
-  const rows = await db.getAllAsync<{ id: number }>(sql, params);
-  return rows.map((row) => row.id);
+  sql += ' ORDER BY RANDOM() LIMIT 1';
+
+  const row = await db.getFirstAsync<{ id: number }>(sql, params);
+  return row?.id ?? null;
 }
 
 async function loadNodeById(db: SQLiteDatabase, nodeId: number) {
@@ -245,6 +246,24 @@ export function bestAction(handFreq: TrainerHandFrequencies): TrainerAction {
       ? action
       : best;
   }, 'Fold');
+}
+
+export function computeSolvrScore(
+  action: TrainerAction,
+  handFreq: TrainerHandFrequencies,
+) {
+  const strategy = {
+    fold: handFreq.fold_freq,
+    call: handFreq.call_freq,
+    raise: handFreq.raise_freq,
+    all_in: handFreq.all_in_freq,
+  };
+  const actionKey = action === 'All-in' ? 'all_in' : (action.toLowerCase() as keyof typeof strategy);
+  const chosenFreq = strategy[actionKey] ?? 0;
+  if (chosenFreq === 0) return 0;
+  const dominantFreq = Math.max(...Object.values(strategy));
+  const deviation = Math.max(0, dominantFreq - chosenFreq);
+  return Math.max(0, Math.min(1, 1 - Math.pow(deviation / 100, 4)));
 }
 
 export function scenarioLabel(spot: TrainerSpot) {

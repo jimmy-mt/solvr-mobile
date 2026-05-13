@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
+  Easing,
   Platform,
   Pressable,
   ScrollView,
@@ -9,10 +11,12 @@ import {
   View,
 } from 'react-native';
 import { useSQLiteContext } from 'expo-sqlite';
+import { useIsFocused } from '@react-navigation/native';
 
 import { RangeLegend } from '../../components/range-grid/RangeGrid';
 import { C } from '../../constants/colors';
 import {
+  availableActionsForSpot,
   formatBB,
   scenarioLabel,
   type TrainerHandFrequencies,
@@ -154,16 +158,22 @@ function pillStateForPosition(pos: string, spot: TrainerSpot | null): PillState 
 // ─── Main screen ─────────────────────────────────────────────────────────────
 
 type NodeData = NonNullable<Awaited<ReturnType<typeof loadNode>>>;
+type EntranceRangeGridHandle = {
+  replay: () => void;
+};
 
 export function RangesScreen() {
   const db = useSQLiteContext();
 
+  const isFocused = useIsFocused();
+  const wasFocused = useRef(false);
+  const gridRef = useRef<EntranceRangeGridHandle | null>(null);
+
   const [nodeId, setNodeId] = useState(ROOT_NODE_ID);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [nodeData, setNodeData] = useState<NodeData | null>(null);
-  const [loading, setLoading] = useState(true);
   const [selCell, setSelCell] = useState<string | null>(null);
-  const [entranceKey, setEntranceKey] = useState(0);
+  const [detailAnimKey, setDetailAnimKey] = useState(0);
 
   // Cache: nodeId → loaded data (avoids re-querying already-visited nodes)
   const cache = useMemo(() => new Map<number, NodeData>(), [db]);
@@ -187,7 +197,6 @@ export function RangesScreen() {
       if (data) {
         setNodeData(data);
         setSelCell(null);
-        setLoading(false);
         // Prefetch all children in the background
         for (const t of data.transitions) {
           loadAndCache(t.to_node_id);
@@ -200,6 +209,24 @@ export function RangesScreen() {
   useEffect(() => {
     load(nodeId);
   }, [nodeId, load]);
+
+  useEffect(() => {
+    if (isFocused && !wasFocused.current) {
+      let secondFrame: number | null = null;
+      const firstFrame = requestAnimationFrame(() => {
+        secondFrame = requestAnimationFrame(() => {
+          gridRef.current?.replay();
+          setDetailAnimKey((k) => k + 1);
+        });
+      });
+      wasFocused.current = isFocused;
+      return () => {
+        cancelAnimationFrame(firstFrame);
+        if (secondFrame != null) cancelAnimationFrame(secondFrame);
+      };
+    }
+    wasFocused.current = isFocused;
+  }, [isFocused]);
 
   const navigate = useCallback(
     (action: NavAction) => {
@@ -223,6 +250,7 @@ export function RangesScreen() {
   );
 
   const goBack = useCallback(() => {
+    setEndOfHand(null);
     setHistory((h) => {
       const prev = h[h.length - 1];
       if (!prev) return h;
@@ -238,6 +266,7 @@ export function RangesScreen() {
   }, [cache]);
 
   const reset = useCallback(() => {
+    setEndOfHand(null);
     setHistory([]);
     const cached = cache.get(ROOT_NODE_ID);
     if (cached) {
@@ -246,18 +275,66 @@ export function RangesScreen() {
     } else {
       setNodeId(ROOT_NODE_ID);
     }
-    setEntranceKey((k) => k + 1);
+    requestAnimationFrame(() => {
+      gridRef.current?.replay();
+      setDetailAnimKey((k) => k + 1);
+    });
   }, [cache]);
 
   const transitions = nodeData?.transitions ?? [];
   const hasBack = history.length > 0;
 
-  const foldTrans = transitions.find((t) => t.action === 'fold');
-  const callTrans = transitions.find((t) => t.action === 'call');
-  const raiseTrans = transitions.find((t) => t.action === 'raise');
-  const allInTrans = transitions.find((t) => t.action === 'all_in');
+  // Derive available actions from the current spot's hand frequencies (source of truth),
+  // then look up transitions separately just for navigation targets.
+  const availableActions = nodeData ? availableActionsForSpot(nodeData.hands) : [];
+  const hasFold = availableActions.includes('Fold');
+  const hasCall = availableActions.includes('Call');
+  const hasRaise = availableActions.includes('Raise');
+  const hasAllIn = availableActions.includes('All-in');
+
+
+  const [endOfHand, setEndOfHand] = useState<'fold' | 'call' | 'all_in' | null>(null);
+
+  const handleAction = useCallback(
+    (action: NavAction) => {
+      setEndOfHand(null);
+      const trans = transitions.find((t) => t.action === action);
+      if (trans) {
+        navigate(action);
+      } else if (action !== 'raise') {
+        setEndOfHand(action);
+        setSelCell(null);
+      }
+    },
+    [transitions, navigate],
+  );
 
   const selFreq = selCell && nodeData?.hands[selCell] ? nodeData.hands[selCell] : null;
+
+  // Weighted aggregate across all possible hands (weight = hand_probability)
+  const aggregateFreq = useMemo((): TrainerHandFrequencies | null => {
+    if (!nodeData) return null;
+    const values = Object.values(nodeData.hands).filter((h) => h.possible && h.hand_probability > 0);
+    if (values.length === 0) return null;
+    const totalWeight = values.reduce((s, h) => s + h.hand_probability, 0);
+    if (totalWeight === 0) return null;
+    return {
+      fold_freq: values.reduce((s, h) => s + h.fold_freq * h.hand_probability, 0) / totalWeight,
+      call_freq: values.reduce((s, h) => s + h.call_freq * h.hand_probability, 0) / totalWeight,
+      raise_freq: values.reduce((s, h) => s + h.raise_freq * h.hand_probability, 0) / totalWeight,
+      all_in_freq: values.reduce((s, h) => s + h.all_in_freq * h.hand_probability, 0) / totalWeight,
+      hand_probability: 100,
+      possible: true,
+      reach: 100,
+    };
+  }, [nodeData]);
+
+  // What CellDetail shows: selected hand if tapped, otherwise the aggregate
+  const detailFreq = selFreq ?? aggregateFreq;
+  const detailLabel = selCell ?? 'Range';
+  const handleCellPress = useCallback((cell: string) => {
+    setSelCell((prev) => (prev === cell ? null : cell));
+  }, []);
 
   return (
     <View style={styles.screen}>
@@ -298,7 +375,7 @@ export function RangesScreen() {
         {/* Scenario label */}
         <View style={styles.scenarioBox}>
           <Text style={styles.scenarioLabel} numberOfLines={2}>
-            {loading ? '…' : label || 'Select a spot'}
+            {label || 'Ranges'}
           </Text>
         </View>
 
@@ -307,42 +384,61 @@ export function RangesScreen() {
           <View style={styles.rangePanel}>
             <RangeLegend hands={nodeData.hands} />
             <EntranceRangeGrid
-              key={entranceKey}
+              ref={gridRef}
               hands={nodeData.hands}
+              focused={isFocused}
               selectedHand={selCell}
-              onCellPress={(cell) => setSelCell((prev) => (prev === cell ? null : cell))}
+              onCellPress={handleCellPress}
             />
           </View>
         )}
 
-        {/* Selected cell detail */}
-        {selCell && selFreq && <CellDetail hand={selCell} freq={selFreq} />}
+        {/* Frequency detail — shows selected hand or weighted range aggregate */}
+        {detailFreq && (
+          <View style={{ marginTop: -6 }}>
+            <CellDetail hand={detailLabel} freq={detailFreq} animationKey={detailAnimKey} />
+          </View>
+        )}
 
-        {/* Action navigation buttons */}
-        {(foldTrans || callTrans || raiseTrans || allInTrans) && (
-          <View style={styles.actionRow}>
-            {foldTrans && (
-              <Pressable style={[styles.actionBtn, styles.foldBtn]} onPress={() => navigate('fold')}>
-                <Text style={styles.actionBtnText}>Fold</Text>
-              </Pressable>
-            )}
-            {callTrans && (
-              <Pressable style={[styles.actionBtn, styles.callBtn]} onPress={() => navigate('call')}>
-                <Text style={styles.actionBtnText}>Call</Text>
-              </Pressable>
-            )}
-            {raiseTrans && (
-              <Pressable style={[styles.actionBtn, styles.raiseBtn]} onPress={() => navigate('raise')}>
-                <Text style={styles.actionBtnText}>
-                  Raise{raiseTrans.proposed_raise_bb ? ` ${formatBB(raiseTrans.proposed_raise_bb)}` : ''}
-                </Text>
-              </Pressable>
-            )}
-            {allInTrans && (
-              <Pressable style={[styles.actionBtn, styles.allInBtn]} onPress={() => navigate('all_in')}>
-                <Text style={styles.actionBtnText}>All-in</Text>
-              </Pressable>
-            )}
+        {/* End-of-hand banner */}
+        {endOfHand && (
+          <View style={styles.endOfHandBox}>
+            <Text style={styles.endOfHandTitle}>End of preflop</Text>
+            <Text style={styles.endOfHandSub}>
+              {endOfHand === 'fold' ? 'Hand folded — no further spots yet.' : endOfHand === 'call' ? 'Hand called — postflop coming soon.' : 'All-in — postflop coming soon.'}
+            </Text>
+          </View>
+        )}
+
+        {/* Action buttons — inside scroll, same sizing as trainer */}
+        {nodeData && (hasFold || hasCall || hasRaise || hasAllIn) && (
+          <View style={styles.actionDock}>
+            <View style={styles.actionGrid}>
+              {hasFold && (
+                <Pressable style={[styles.actionButton, styles.foldButton]} onPress={() => handleAction('fold')}>
+                  <Text style={styles.actionText}>Fold</Text>
+                </Pressable>
+              )}
+              {hasCall && (
+                <Pressable style={[styles.actionButton, styles.callButton]} onPress={() => handleAction('call')}>
+                  <Text style={styles.actionText}>
+                    Call{spot?.facingBB ? ` ${formatBB(spot.facingBB)}` : ''}
+                  </Text>
+                </Pressable>
+              )}
+              {hasRaise && (
+                <Pressable style={[styles.actionButton, styles.raiseButton]} onPress={() => handleAction('raise')}>
+                  <Text style={styles.actionText}>
+                    Raise{nodeData.node.proposed_raise_bb ? ` ${formatBB(nodeData.node.proposed_raise_bb)}` : ''}
+                  </Text>
+                </Pressable>
+              )}
+              {hasAllIn && (
+                <Pressable style={[styles.actionButton, styles.allInButton]} onPress={() => handleAction('all_in')}>
+                  <Text style={styles.actionText}>All-in</Text>
+                </Pressable>
+              )}
+            </View>
           </View>
         )}
 
@@ -355,6 +451,7 @@ export function RangesScreen() {
 // ─── Entrance range grid ──────────────────────────────────────────────────────
 
 const RANKS = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
+const GRID_ANIMATION_DURATION = 570;
 
 function cellLabel(rr: string, cr: string, ri: number, ci: number) {
   if (ri === ci) return rr + cr;
@@ -362,23 +459,55 @@ function cellLabel(rr: string, cr: string, ri: number, ci: number) {
   return cr + rr + 'o';
 }
 
-function EntranceRangeGrid({
-  hands,
-  selectedHand,
-  onCellPress,
-}: {
+const EntranceRangeGrid = memo(forwardRef<EntranceRangeGridHandle, {
+  focused: boolean;
   hands: Record<string, TrainerHandFrequencies>;
   selectedHand: string | null;
   onCellPress: (hand: string) => void;
-}) {
+}>(function EntranceRangeGrid({
+  focused,
+  hands,
+  selectedHand,
+  onCellPress,
+}, ref) {
+  const progress = useRef(new Animated.Value(0)).current;
+
+  const replay = useCallback(() => {
+    progress.setValue(0);
+    const animation = Animated.timing(progress, {
+      toValue: 1,
+      duration: GRID_ANIMATION_DURATION,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [progress]);
+
+  useImperativeHandle(ref, () => ({ replay }), [replay]);
+
+  useEffect(() => {
+    if (!focused) {
+      progress.setValue(0);
+    }
+  }, [focused, progress]);
+
   return (
     <View style={entranceStyles.grid}>
-      {RANKS.map((rowRank, ri) => (
-        <View key={rowRank} style={entranceStyles.row}>
+      {RANKS.map((rowRank, ri) => {
+        const rowSelected = RANKS.some((colRank, ci) => cellLabel(rowRank, colRank, ri, ci) === selectedHand);
+        return (
+        <View key={rowRank} style={[entranceStyles.row, rowSelected && { zIndex: 10 }]}>
           {RANKS.map((colRank, ci) => {
             const label = cellLabel(rowRank, colRank, ri, ci);
             const freq = hands[label];
             const selected = label === selectedHand;
+            const cellDelay = ((ri + ci) * 13) / GRID_ANIMATION_DURATION;
+            const opacity = progress.interpolate({
+              inputRange: [0, Math.min(cellDelay, 0.96), Math.min(cellDelay + 0.14, 1)],
+              outputRange: [0, 0, 1],
+              extrapolate: 'clamp',
+            });
 
             const segments =
               freq && freq.possible
@@ -396,10 +525,16 @@ function EntranceRangeGrid({
             return (
               <Pressable
                 key={label}
-                style={entranceStyles.cellOuter}
+                style={[entranceStyles.cellOuter, selected && entranceStyles.cellOuterSelected]}
                 onPress={() => onCellPress(label)}
               >
-                <View style={[entranceStyles.cell, selected && entranceStyles.cellSelected]}>
+                <Animated.View
+                  style={[
+                    entranceStyles.cell,
+                    selected && entranceStyles.cellSelected,
+                    { opacity },
+                  ]}
+                >
                   <View style={entranceStyles.segments}>
                     {segments.length > 0 ? (
                       <View style={{ flex: 1, flexDirection: 'column' }}>
@@ -422,15 +557,16 @@ function EntranceRangeGrid({
                   <View style={entranceStyles.textWrapper}>
                     <Text style={entranceStyles.cellText}>{label}</Text>
                   </View>
-                </View>
+                </Animated.View>
               </Pressable>
             );
           })}
         </View>
-      ))}
+        );
+      })}
     </View>
   );
-}
+}));
 
 const entranceStyles = StyleSheet.create({
   grid: { flexDirection: 'column', gap: 0 },
@@ -445,11 +581,14 @@ const entranceStyles = StyleSheet.create({
     overflow: 'hidden',
     position: 'relative',
   },
+  cellOuterSelected: {
+    zIndex: 10,
+    elevation: 10,
+  },
   cellSelected: {
-    borderColor: C.purpleLight,
+    borderColor: C.gold,
     borderWidth: 3,
     margin: -2,
-    zIndex: 1,
   },
   segments: { ...StyleSheet.absoluteFillObject, flexDirection: 'row' },
   textWrapper: {
@@ -462,13 +601,39 @@ const entranceStyles = StyleSheet.create({
 
 // ─── Cell detail panel ────────────────────────────────────────────────────────
 
-function CellDetail({ hand, freq }: { hand: string; freq: TrainerHandFrequencies }) {
-  const rows: Array<{ label: string; value: number; color: string }> = [
-    { label: 'Raise', value: freq.raise_freq, color: C.red },
+
+const cellDetailSlideEasing = Easing.bezier(0.22, 1, 0.36, 1);
+
+function CellDetail({
+  animationKey,
+  hand,
+  freq,
+}: {
+  animationKey: number;
+  hand: string;
+  freq: TrainerHandFrequencies;
+}) {
+  const segments = [
     { label: 'All-in', value: freq.all_in_freq, color: C.allIn },
+    { label: 'Raise', value: freq.raise_freq, color: C.red },
     { label: 'Call', value: freq.call_freq, color: C.green },
     { label: 'Fold', value: freq.fold_freq, color: C.blue },
-  ].filter((r) => r.value > 0);
+  ].filter((s) => s.value > 0);
+  const total = segments.reduce((sum, s) => sum + s.value, 0);
+
+  const revealWidth = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    revealWidth.setValue(0);
+    const anim = Animated.timing(revealWidth, {
+      toValue: 100,
+      duration: 900,
+      easing: cellDetailSlideEasing,
+      useNativeDriver: false,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [animationKey, revealWidth]);
 
   return (
     <View style={styles.cellDetail}>
@@ -476,24 +641,41 @@ function CellDetail({ hand, freq }: { hand: string; freq: TrainerHandFrequencies
         <Text style={styles.cellDetailHand}>{hand}</Text>
         {!freq.possible && <Text style={styles.cellDetailImpossible}>Not reachable</Text>}
       </View>
-      {rows.length === 0 ? (
+      {segments.length === 0 ? (
         <Text style={styles.cellDetailEmpty}>No frequency data</Text>
       ) : (
-        rows.map((r) => (
-          <View key={r.label} style={styles.cellDetailRow}>
-            <View style={[styles.cellDetailDot, { backgroundColor: r.color }]} />
-            <Text style={styles.cellDetailLabel}>{r.label}</Text>
-            <View style={styles.cellDetailBarTrack}>
-              <View
-                style={[
-                  styles.cellDetailBarFill,
-                  { width: `${r.value}%`, backgroundColor: r.color },
-                ]}
-              />
-            </View>
-            <Text style={styles.cellDetailValue}>{r.value.toFixed(0)}%</Text>
+        <>
+          {/* Outer track clips the reveal */}
+          <View style={[styles.cellDetailBar, { overflow: 'hidden' }]}>
+            {/* Inner row holds all segments at full width; reveal clips it */}
+            <Animated.View
+              style={{
+                flexDirection: 'row',
+                width: revealWidth.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }),
+                height: '100%',
+                overflow: 'hidden',
+              }}
+            >
+              {/* Segments fill the inner row proportionally */}
+              <View style={{ flex: 1, flexDirection: 'row' }}>
+                {segments.map((s) => (
+                  <View
+                    key={s.label}
+                    style={{ flex: s.value / total, backgroundColor: s.color, height: '100%' }}
+                  />
+                ))}
+              </View>
+            </Animated.View>
           </View>
-        ))
+          <View style={styles.cellDetailLegend}>
+            {segments.map((s) => (
+              <View key={s.label} style={styles.cellDetailLegendItem}>
+                <View style={[styles.cellDetailDot, { backgroundColor: s.color }]} />
+                <Text style={styles.cellDetailLegendText}>{s.label} {s.value.toFixed(0)}%</Text>
+              </View>
+            ))}
+          </View>
+        </>
       )}
     </View>
   );
@@ -662,61 +844,79 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textAlign: 'center',
   },
-  cellDetailRow: {
+  cellDetailBar: {
+    borderRadius: 6,
+    flexDirection: 'row',
+    height: 14,
+    overflow: 'hidden',
+  },
+  cellDetailLegend: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  cellDetailLegendItem: {
     alignItems: 'center',
     flexDirection: 'row',
-    gap: 8,
+    gap: 4,
   },
   cellDetailDot: {
     borderRadius: 3,
-    height: 10,
-    width: 10,
-  },
-  cellDetailLabel: {
-    color: C.textSec,
-    fontSize: 12,
-    fontWeight: '800',
-    width: 44,
-  },
-  cellDetailBarTrack: {
-    backgroundColor: C.surface2,
-    borderRadius: 4,
-    flex: 1,
     height: 8,
-    overflow: 'hidden',
+    width: 8,
   },
-  cellDetailBarFill: {
-    borderRadius: 4,
-    height: '100%',
+  cellDetailLegendText: {
+    color: C.textSec,
+    fontSize: 11,
+    fontWeight: '700',
   },
-  cellDetailValue: {
-    color: C.text,
-    fontSize: 12,
-    fontWeight: '900',
-    textAlign: 'right',
-    width: 38,
+  actionDock: {
+    paddingBottom: 6,
+    paddingTop: 0,
   },
-  actionRow: {
+  actionGrid: {
     flexDirection: 'row',
     gap: 8,
   },
-  actionBtn: {
+  actionButton: {
     alignItems: 'center',
     borderRadius: 14,
     flex: 1,
-    minHeight: 52,
+    flexBasis: 0,
+    minHeight: 78,
     justifyContent: 'center',
     paddingHorizontal: 6,
     paddingVertical: 12,
   },
-  actionBtnText: {
+  actionText: {
     color: 'white',
     fontSize: 14,
     fontWeight: '800',
     textAlign: 'center',
   },
-  foldBtn: { backgroundColor: C.blue },
-  callBtn: { backgroundColor: C.green },
-  raiseBtn: { backgroundColor: C.red },
-  allInBtn: { backgroundColor: C.allIn },
+  foldButton: { backgroundColor: C.blue },
+  callButton: { backgroundColor: C.green },
+  raiseButton: { backgroundColor: C.red },
+  allInButton: { backgroundColor: C.allIn },
+  endOfHandBox: {
+    backgroundColor: C.surface,
+    borderColor: C.border,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+    gap: 4,
+  },
+  endOfHandTitle: {
+    color: C.text,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  endOfHandSub: {
+    color: C.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
 });
