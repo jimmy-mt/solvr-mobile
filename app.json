@@ -5,7 +5,7 @@
     "scheme": "solvr",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/Solvr-AppIcon-1024.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
@@ -14,7 +14,12 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "icon": "./assets/Solvr-AppIcon-1024.png",
+      "bundleIdentifier": "com.jimmymt.solvrmobile",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -29,7 +34,15 @@
     },
     "plugins": [
       "expo-sqlite",
-      "expo-router"
-    ]
+      "expo-router",
+      "expo-asset",
+      "onnxruntime-react-native"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "0d8df897-f608-4f28-bfbb-87cc4ffbd354"
+      }
+    }
   }
 }

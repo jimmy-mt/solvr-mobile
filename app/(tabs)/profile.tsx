@@ -1,5 +1,5 @@
-import { PlaceholderScreen } from '../../src/components/PlaceholderScreen';
+import { ProfileScreen } from '../../src/screens/profile/ProfileScreen';
 
 export default function ProfileTab() {
-  return <PlaceholderScreen title="Profile" subtitle="Account, plan, and progress will live here." />;
+  return <ProfileScreen />;
 }

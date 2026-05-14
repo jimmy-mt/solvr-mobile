@@ -3,6 +3,8 @@ import { Stack } from 'expo-router';
 import { SQLiteProvider, useSQLiteContext } from 'expo-sqlite';
 import { StatusBar } from 'expo-status-bar';
 
+import { C } from '../src/constants/colors';
+
 function DbWarmup() {
   const db = useSQLiteContext();
   useEffect(() => {
@@ -31,8 +33,8 @@ export default function RootLayout() {
       assetSource={{ assetId: require('../assets/trainer.db') }}
     >
       <DbWarmup />
-      <StatusBar style="light" />
-      <Stack screenOptions={{ headerShown: false }}>
+      <StatusBar style="light" backgroundColor={C.bg} />
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}>
         <Stack.Screen name="(tabs)" />
       </Stack>
     </SQLiteProvider>

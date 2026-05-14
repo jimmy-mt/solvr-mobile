@@ -37,6 +37,13 @@ type SessionSummary = {
   filterLabel: string;
 };
 
+type StreakSummary = {
+  todayHands: number;
+  progress: number;
+  goalMet: boolean;
+  currentStreak: number;
+};
+
 type GroupStats = {
   key: string;
   label: string;
@@ -70,6 +77,7 @@ const spotLabels: Record<Exclude<SpotTypeFilter, 'ANY'>, string> = {
   V3B: 'VS 3Bet',
   V4B: 'VS 4Bet',
 };
+const DAILY_STREAK_GOAL = 10;
 
 export function HomeScreen() {
   const router = useRouter();
@@ -82,6 +90,7 @@ export function HomeScreen() {
   const [positionFilter, setPositionFilter] = useState<PositionFilter>('ALL');
   const [selectedTablePosition, setSelectedTablePosition] = useState<PositionFilter | null>(null);
   const [showAnalyticsFilters, setShowAnalyticsFilters] = useState(false);
+  const [showStreakModal, setShowStreakModal] = useState(false);
   const [tableMetric, setTableMetric] = useState<TableMetric>('solvr');
 
   const loadScores = useCallback(() => {
@@ -147,6 +156,7 @@ export function HomeScreen() {
   }, [decisions]);
   const allTimeOverall = useMemo(() => summarizeRows('overall', 'Overall', decisions), [decisions]);
   const sessions = useMemo(() => buildSessionSummaries(decisions, performanceSessions), [decisions, performanceSessions]);
+  const streak = useMemo(() => buildStreakSummary(decisions), [decisions]);
 
   if (view === 'analytics') {
     return (
@@ -187,6 +197,17 @@ export function HomeScreen() {
     <ScrollView style={styles.screen} contentContainerStyle={styles.homeContent} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
         <Text style={styles.title}>Solvr</Text>
+        <Pressable
+          onPress={() => setShowStreakModal(true)}
+          style={({ pressed }) => [styles.streakButton, pressed && styles.analyticsCardPressed]}
+          accessibilityRole="button"
+          accessibilityLabel={`Daily streak. ${streak.todayHands} of ${DAILY_STREAK_GOAL} hands complete today.`}
+        >
+          <Text style={styles.streakIcon}>🔥</Text>
+          <View style={styles.streakTrack}>
+            <View style={[styles.streakFill, { width: `${Math.round(streak.progress * 100)}%` }]} />
+          </View>
+        </Pressable>
       </View>
 
       <Pressable
@@ -252,6 +273,46 @@ export function HomeScreen() {
       >
         <Text style={styles.startTrainingText}>Start Training</Text>
       </Pressable>
+
+      <Modal
+        visible={showStreakModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowStreakModal(false)}
+      >
+        <Pressable style={styles.infoModalBackdrop} onPress={() => setShowStreakModal(false)}>
+          <Pressable style={styles.infoModalCard}>
+            <View style={styles.infoModalHeader}>
+              <Text style={styles.infoModalTitle}>Daily Streak</Text>
+              <Pressable onPress={() => setShowStreakModal(false)} style={styles.infoModalClose}>
+                <Text style={styles.infoModalCloseText}>x</Text>
+              </Pressable>
+            </View>
+            <View style={styles.streakModalHero}>
+              <Text style={styles.streakModalIcon}>🔥</Text>
+              <Text style={styles.streakModalValue}>{streak.currentStreak}</Text>
+              <Text style={styles.streakModalLabel}>
+                {streak.currentStreak === 1 ? 'day streak' : 'day streak'}
+              </Text>
+            </View>
+            <View style={styles.streakModalProgress}>
+              <View style={styles.streakModalProgressTop}>
+                <Text style={styles.streakModalProgressLabel}>Today</Text>
+                <Text style={styles.streakModalProgressValue}>
+                  {Math.min(streak.todayHands, DAILY_STREAK_GOAL)}/{DAILY_STREAK_GOAL} hands
+                </Text>
+              </View>
+              <View style={styles.streakModalTrack}>
+                <View style={[styles.streakModalFill, { width: `${Math.round(streak.progress * 100)}%` }]} />
+              </View>
+            </View>
+            <Text style={styles.infoModalText}>
+              Complete {DAILY_STREAK_GOAL} trainer hands in a day to light the streak bar.
+              {streak.goalMet ? ' Today is already counted.' : ' Keep going to count today.'}
+            </Text>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </ScrollView>
   );
 }
@@ -1278,6 +1339,49 @@ function percent(value: number) {
   return `${(Math.max(0, Math.min(1, value)) * 100).toFixed(1)}%`;
 }
 
+function buildStreakSummary(decisions: PerformanceDecision[]): StreakSummary {
+  const countsByDay = new Map<string, number>();
+  decisions.forEach((decision) => {
+    const key = dayKey(decision.timestamp);
+    countsByDay.set(key, (countsByDay.get(key) ?? 0) + 1);
+  });
+
+  const today = startOfLocalDay(Date.now());
+  const todayHands = countsByDay.get(dayKey(today.getTime())) ?? 0;
+  const goalMet = todayHands >= DAILY_STREAK_GOAL;
+  let streakCursor = goalMet ? today : addDays(today, -1);
+  let currentStreak = 0;
+
+  while ((countsByDay.get(dayKey(streakCursor.getTime())) ?? 0) >= DAILY_STREAK_GOAL) {
+    currentStreak += 1;
+    streakCursor = addDays(streakCursor, -1);
+  }
+
+  return {
+    todayHands,
+    progress: Math.min(1, todayHands / DAILY_STREAK_GOAL),
+    goalMet,
+    currentStreak,
+  };
+}
+
+function dayKey(timestamp: number) {
+  const day = startOfLocalDay(timestamp);
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+}
+
+function startOfLocalDay(timestamp: number) {
+  const date = new Date(timestamp);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
@@ -1298,6 +1402,7 @@ const styles = StyleSheet.create({
   header: {
     alignItems: 'center',
     gap: 6,
+    position: 'relative',
   },
   analyticsHeader: {
     alignItems: 'center',
@@ -1316,6 +1421,36 @@ const styles = StyleSheet.create({
     color: C.textSec,
     fontSize: 15,
     lineHeight: 21,
+  },
+  streakButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(251, 146, 60, 0.12)',
+    borderColor: 'rgba(251, 146, 60, 0.5)',
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+    position: 'absolute',
+    right: 0,
+    top: -2,
+    width: 54,
+  },
+  streakIcon: {
+    fontSize: 18,
+    lineHeight: 20,
+  },
+  streakTrack: {
+    backgroundColor: 'rgba(251, 146, 60, 0.2)',
+    borderRadius: 4,
+    height: 5,
+    overflow: 'hidden',
+    width: '100%',
+  },
+  streakFill: {
+    backgroundColor: '#fb923c',
+    borderRadius: 4,
+    height: '100%',
   },
   startTrainingButton: {
     alignItems: 'center',
@@ -2026,6 +2161,61 @@ const styles = StyleSheet.create({
     color: C.textSec,
     fontSize: 13,
     lineHeight: 19,
+  },
+  streakModalHero: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(251, 146, 60, 0.1)',
+    borderColor: 'rgba(251, 146, 60, 0.34)',
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 2,
+    padding: 16,
+  },
+  streakModalIcon: {
+    fontSize: 28,
+    lineHeight: 32,
+  },
+  streakModalValue: {
+    color: C.text,
+    fontSize: 34,
+    fontWeight: '900',
+    lineHeight: 38,
+  },
+  streakModalLabel: {
+    color: C.textSec,
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  streakModalProgress: {
+    gap: 8,
+  },
+  streakModalProgressTop: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  streakModalProgressLabel: {
+    color: C.textSec,
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  streakModalProgressValue: {
+    color: C.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  streakModalTrack: {
+    backgroundColor: 'rgba(251, 146, 60, 0.18)',
+    borderRadius: 6,
+    height: 10,
+    overflow: 'hidden',
+  },
+  streakModalFill: {
+    backgroundColor: '#fb923c',
+    borderRadius: 6,
+    height: '100%',
   },
   canonicalKey: {
     color: C.textMuted,

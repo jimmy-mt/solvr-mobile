@@ -1,4 +1,5 @@
 import { Tabs } from 'expo-router';
+import { Easing } from 'react-native';
 
 import { C } from '../../src/constants/colors';
 
@@ -6,7 +7,18 @@ import { C } from '../../src/constants/colors';
 export default function TabLayout() {
   return (
     <Tabs
+      detachInactiveScreens={false}
       screenOptions={{
+        animation: 'shift',
+        freezeOnBlur: false,
+        lazy: false,
+        transitionSpec: {
+          animation: 'timing',
+          config: {
+            duration: 240,
+            easing: Easing.out(Easing.cubic),
+          },
+        },
         headerShown: false,
         sceneStyle: {
           backgroundColor: C.bg,

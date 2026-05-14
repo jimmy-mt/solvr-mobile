@@ -11,7 +11,6 @@ export type PokerTableProps = {
   foldedPositions?: SeatPosition[];
   raiseAmounts?: Partial<Record<SeatPosition, number>>;
   blindAmounts?: Partial<Record<SeatPosition, number>>;
-  stackAmounts?: Partial<Record<SeatPosition, number>>;
   cards?: [PlayingCard, PlayingCard] | null;
   theme?: 'green' | 'blue';
   dealKey?: number | string;

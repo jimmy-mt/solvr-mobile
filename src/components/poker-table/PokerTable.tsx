@@ -31,7 +31,6 @@ export function PokerTable({
   foldedPositions = [],
   raiseAmounts = {},
   blindAmounts = {},
-  stackAmounts = {},
   theme = 'green',
   dealKey,
 }: PokerTableProps) {
@@ -82,12 +81,12 @@ export function PokerTable({
           <Path d={TABLE_PATH} fill="url(#feltGrad)" />
         </Svg>
 
-        <PlayerSeat seat={topSeat} position={TABLE_SEAT_POSITIONS.top} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(topSeat)} raisedBB={raiseAmounts[topSeat]} blindBB={blindAmounts[topSeat]} stackBB={stackAmounts[topSeat]} />
-        <PlayerSeat seat={rightSeats[0]} position={TABLE_SEAT_POSITIONS.rightBottom} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(rightSeats[0])} raisedBB={raiseAmounts[rightSeats[0]]} blindBB={blindAmounts[rightSeats[0]]} stackBB={stackAmounts[rightSeats[0]]} />
-        <PlayerSeat seat={rightSeats[1]} position={TABLE_SEAT_POSITIONS.rightTop} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(rightSeats[1])} raisedBB={raiseAmounts[rightSeats[1]]} blindBB={blindAmounts[rightSeats[1]]} stackBB={stackAmounts[rightSeats[1]]} />
-        <PlayerSeat seat={leftSeats[0]} position={TABLE_SEAT_POSITIONS.leftBottom} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(leftSeats[0])} raisedBB={raiseAmounts[leftSeats[0]]} blindBB={blindAmounts[leftSeats[0]]} stackBB={stackAmounts[leftSeats[0]]} />
-        <PlayerSeat seat={leftSeats[1]} position={TABLE_SEAT_POSITIONS.leftTop} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(leftSeats[1])} raisedBB={raiseAmounts[leftSeats[1]]} blindBB={blindAmounts[leftSeats[1]]} stackBB={stackAmounts[leftSeats[1]]} />
-        <PlayerSeat seat={heroPos} position={TABLE_SEAT_POSITIONS.hero} heroPos={heroPos} openerPos={openerPos} folded={false} raisedBB={raiseAmounts[heroPos]} blindBB={blindAmounts[heroPos]} stackBB={stackAmounts[heroPos]} />
+        <PlayerSeat seat={topSeat} position={TABLE_SEAT_POSITIONS.top} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(topSeat)} raisedBB={raiseAmounts[topSeat]} blindBB={blindAmounts[topSeat]} />
+        <PlayerSeat seat={rightSeats[0]} position={TABLE_SEAT_POSITIONS.rightBottom} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(rightSeats[0])} raisedBB={raiseAmounts[rightSeats[0]]} blindBB={blindAmounts[rightSeats[0]]} />
+        <PlayerSeat seat={rightSeats[1]} position={TABLE_SEAT_POSITIONS.rightTop} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(rightSeats[1])} raisedBB={raiseAmounts[rightSeats[1]]} blindBB={blindAmounts[rightSeats[1]]} />
+        <PlayerSeat seat={leftSeats[0]} position={TABLE_SEAT_POSITIONS.leftBottom} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(leftSeats[0])} raisedBB={raiseAmounts[leftSeats[0]]} blindBB={blindAmounts[leftSeats[0]]} />
+        <PlayerSeat seat={leftSeats[1]} position={TABLE_SEAT_POSITIONS.leftTop} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(leftSeats[1])} raisedBB={raiseAmounts[leftSeats[1]]} blindBB={blindAmounts[leftSeats[1]]} />
+        <PlayerSeat seat={heroPos} position={TABLE_SEAT_POSITIONS.hero} heroPos={heroPos} openerPos={openerPos} folded={foldedSet.has(heroPos)} raisedBB={raiseAmounts[heroPos]} blindBB={blindAmounts[heroPos]} />
 
         <View pointerEvents="none" style={styles.potBadge}>
           <Text style={styles.potText}>Pot {fmtBB(potBB)}</Text>

@@ -12,7 +12,6 @@ type PlayerSeatProps = {
   folded: boolean;
   raisedBB?: number;
   blindBB?: number;
-  stackBB?: number;
 };
 
 export function PlayerSeat({
@@ -23,19 +22,16 @@ export function PlayerSeat({
   folded,
   raisedBB,
   blindBB,
-  stackBB,
 }: PlayerSeatProps) {
   const isHero = seat === heroPos;
   const isOpener = seat === openerPos;
   const showRaiseBadge = raisedBB != null || blindBB != null;
   const committedBB = raisedBB ?? blindBB;
-  const isBlindCommit = blindBB != null && raisedBB == null;
   const isRaised = raisedBB != null;
   const isRaisedFolded = folded && isRaised;
   const isActionSeat = !folded && (isOpener || isRaised);
   const size = isHero ? 84 : 54;
   const badgeBelow = position[1] <= 12;
-  const stackOnLeft = position[0] > 60;
 
   return (
     <View
@@ -54,7 +50,7 @@ export function PlayerSeat({
         isHero && styles.hero,
         isActionSeat && styles.actionSeat,
         isRaisedFolded && styles.raisedFolded,
-        folded && !isRaisedFolded && !isHero && styles.folded,
+        folded && !isRaisedFolded && styles.folded,
       ]}
     >
       {showRaiseBadge && (
@@ -63,30 +59,25 @@ export function PlayerSeat({
             styles.commitBadge,
             badgeBelow ? styles.commitBadgeBelow : styles.commitBadgeAbove,
             styles.commitBadgeCentered,
-            !isBlindCommit && !isRaisedFolded && styles.raiseBadge,
-            (isBlindCommit || isRaisedFolded) && styles.blindBadge,
+            styles.neutralCommitBadge,
+            isHero && styles.heroCommitBadge,
+            isActionSeat && styles.actionCommitBadge,
+            isRaisedFolded && styles.raisedFoldedCommitBadge,
+            folded && !isRaisedFolded && styles.foldedCommitBadge,
           ]}
         >
           <Text
             style={[
               styles.commitText,
-              !isBlindCommit && !isRaisedFolded && styles.raiseText,
-              (isBlindCommit || isRaisedFolded) && styles.blindText,
+              styles.neutralCommitText,
+              isHero && styles.heroCommitText,
+              isActionSeat && styles.actionCommitText,
+              isRaisedFolded && styles.raisedFoldedCommitText,
+              folded && !isRaisedFolded && styles.foldedCommitText,
             ]}
           >
             {fmtBB(committedBB)}
           </Text>
-        </View>
-      )}
-
-      {stackBB != null && (
-        <View
-          style={[
-            styles.stackBadge,
-            stackOnLeft ? styles.stackBadgeLeft : styles.stackBadgeRight,
-          ]}
-        >
-          <Text style={styles.stackText}>{fmtBB(stackBB)}</Text>
         </View>
       )}
 
@@ -98,7 +89,7 @@ export function PlayerSeat({
           isHero && styles.heroLabel,
           isActionSeat && styles.actionLabel,
           isRaisedFolded && styles.raisedFoldedLabel,
-          folded && !isRaisedFolded && !isHero && styles.foldedLabel,
+          folded && !isRaisedFolded && styles.foldedLabel,
           isHero && styles.heroLabelSize,
         ]}
       >
@@ -196,51 +187,50 @@ const styles = StyleSheet.create({
     top: '100%',
     marginTop: 5,
   },
-  raiseBadge: {
-    backgroundColor: 'rgba(245,158,11,0.18)',
-    borderWidth: 2,
-    borderColor: 'rgba(251,191,36,0.82)',
-  },
-  blindBadge: {
+  neutralCommitBadge: {
     backgroundColor: 'rgba(0,0,0,0.35)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.10)',
+  },
+  heroCommitBadge: {
+    backgroundColor: 'rgba(124,58,237,0.34)',
+    borderWidth: 2,
+    borderColor: C.purple,
+  },
+  actionCommitBadge: {
+    backgroundColor: 'rgba(245,158,11,0.24)',
+    borderWidth: 2,
+    borderColor: C.gold,
+  },
+  raisedFoldedCommitBadge: {
+    backgroundColor: 'rgba(253,224,71,0.13)',
+    borderWidth: 1,
+    borderColor: 'rgba(253,224,71,0.38)',
+  },
+  foldedCommitBadge: {
+    backgroundColor: 'rgba(148,163,184,0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(148,163,184,0.24)',
   },
   commitText: {
     fontSize: 12,
     fontWeight: '900',
     lineHeight: 13,
   },
-  raiseText: {
-    color: '#fde68a',
-  },
-  blindText: {
+  neutralCommitText: {
     color: 'rgba(255,255,255,0.50)',
   },
-  stackBadge: {
-    position: 'absolute',
-    top: '50%',
-    marginTop: -10,
-    paddingHorizontal: 7,
-    paddingVertical: 4,
-    borderRadius: 9,
-    backgroundColor: 'rgba(0,0,0,0.32)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
+  heroCommitText: {
+    color: 'white',
   },
-  stackBadgeLeft: {
-    right: '100%',
-    marginRight: 7,
+  actionCommitText: {
+    color: '#fde68a',
   },
-  stackBadgeRight: {
-    left: '100%',
-    marginLeft: 7,
+  raisedFoldedCommitText: {
+    color: '#fef3c7',
   },
-  stackText: {
-    color: 'rgba(237,233,255,0.82)',
-    fontSize: 10,
-    fontWeight: '900',
-    lineHeight: 11,
+  foldedCommitText: {
+    color: 'rgba(203,213,225,0.58)',
   },
   arrow: {
     position: 'absolute',
