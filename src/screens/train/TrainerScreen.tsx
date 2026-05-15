@@ -24,11 +24,19 @@ import {
   dealRandomTrainerHand,
   formatBB,
   getActionFrequency,
+  loadTrainerHand,
   scenarioLabel,
   type SpotTypeFilter,
   type TrainerAction,
   type TrainerDeal,
 } from '../../data/trainerDb';
+import {
+  enqueueImprovePracticeHand,
+  ensureImprovePracticeStore,
+  getImprovePracticeCount,
+  getRandomImprovePracticeHand,
+  removeImprovePracticeHand,
+} from '../../data/improvePracticeStore';
 import {
   endPerformanceSession,
   ensurePerformanceStore,
@@ -47,6 +55,7 @@ const spotFilters: Array<{ label: string; value: SpotTypeFilter }> = [
 const allPositions = ['UTG', 'HJ', 'CO', 'BTN', 'SB', 'BB'];
 const ranks = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
 const TOP_CONTENT_OFFSET = 58;
+const MAX_IMPROVE_LOAD_ATTEMPTS = 250;
 const DEFAULT_TABLE_PROPS: PokerTableProps = {
   heroPos: 'BTN',
   openerPos: null,
@@ -62,7 +71,6 @@ export function TrainerScreen() {
   const [posFilter, setPosFilter] = useState<string[]>([]);
   const [showFilters, setShowFilters] = useState(false);
   const [wrongPracticeMode, setWrongPracticeMode] = useState(false);
-  const [testMode, setTestMode] = useState(false);
   const [phase, setPhase] = useState<'quiz' | 'result'>('quiz');
   const [deal, setDeal] = useState<TrainerDeal | null>(null);
   const [handLoading, setHandLoading] = useState(false);
@@ -73,18 +81,60 @@ export function TrainerScreen() {
   const [lastHandScore, setLastHandScore] = useState<number | null>(null);
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [dealKey, setDealKey] = useState(0);
+  const [improveCount, setImproveCount] = useState(0);
+  const [practiceNotice, setPracticeNotice] = useState<string | null>(null);
   const [showHint, setShowHint] = useState(false);
   const [hintClosing, setHintClosing] = useState(false);
   const [filtersClosing, setFiltersClosing] = useState(false);
+  const noticeOpacity = useRef(new Animated.Value(0)).current;
   const hintCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const filtersCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
       if (hintCloseTimer.current) clearTimeout(hintCloseTimer.current);
       if (filtersCloseTimer.current) clearTimeout(filtersCloseTimer.current);
+      if (noticeTimer.current) clearTimeout(noticeTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    if (!practiceNotice) {
+      noticeOpacity.setValue(0);
+      return;
+    }
+
+    noticeOpacity.setValue(0);
+    Animated.timing(noticeOpacity, {
+      toValue: 1,
+      duration: 180,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+    noticeTimer.current = setTimeout(() => {
+      Animated.timing(noticeOpacity, {
+        toValue: 0,
+        duration: 260,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished) setPracticeNotice(null);
+      });
+    }, 2000);
+  }, [noticeOpacity, practiceNotice]);
+
+  const refreshImproveCount = useCallback(async () => {
+    const count = await getImprovePracticeCount();
+    setImproveCount(count);
+  }, []);
+
+  useEffect(() => {
+    ensureImprovePracticeStore()
+      .then(refreshImproveCount)
+      .catch(() => {});
+  }, [refreshImproveCount]);
 
   const beginSession = useCallback(async () => {
     await ensurePerformanceStore();
@@ -104,7 +154,25 @@ export function TrainerScreen() {
     setHandLoading(true);
     setError(null);
     try {
-      const nextDeal = await dealRandomTrainerHand(db, spotTypeFilter, posFilter);
+      let nextDeal: TrainerDeal | null = null;
+      if (wrongPracticeMode) {
+        for (let attempt = 0; attempt < MAX_IMPROVE_LOAD_ATTEMPTS; attempt += 1) {
+          const queuedHand = await getRandomImprovePracticeHand();
+          if (!queuedHand) break;
+          nextDeal = await loadTrainerHand(db, queuedHand.node_id, queuedHand.hand_class);
+          if (nextDeal) break;
+          await removeImprovePracticeHand(queuedHand.node_id, queuedHand.hand_class);
+        }
+        const nextImproveCount = await getImprovePracticeCount();
+        setImproveCount(nextImproveCount);
+        if (!nextDeal) {
+          setWrongPracticeMode(false);
+          setPracticeNotice('Improve complete. You cleared every hand in the set.');
+          nextDeal = await dealRandomTrainerHand(db, spotTypeFilter, posFilter);
+        }
+      } else {
+        nextDeal = await dealRandomTrainerHand(db, spotTypeFilter, posFilter);
+      }
       if (!nextDeal) {
         setDeal(null);
         setError('No trainer spots found for this filter.');
@@ -121,7 +189,7 @@ export function TrainerScreen() {
     } finally {
       setHandLoading(false);
     }
-  }, [db, posFilter, spotTypeFilter]);
+  }, [db, posFilter, spotTypeFilter, wrongPracticeMode]);
 
   useEffect(() => {
     loadHand();
@@ -143,11 +211,27 @@ export function TrainerScreen() {
     setPicked(action);
     setPhase('result');
     setLastHandScore(score);
+    if (wrongPracticeMode) {
+      if (correct) {
+        removeImprovePracticeHand(deal.spot.nodeId, deal.hand)
+          .then(refreshImproveCount)
+          .catch(() => {});
+      }
+      return;
+    }
+    setPracticeNotice(null);
     setStats((current) => ({
       correct: current.correct + (correct ? 1 : 0),
       total: current.total + 1,
     }));
     setSolvrScore((current) => ({ sum: current.sum + score, count: current.count + 1 }));
+    if (!correct) {
+      enqueueImprovePracticeHand(deal.spot.nodeId, deal.hand)
+        .then(refreshImproveCount)
+        .catch((err) => {
+          setPracticeNotice(err instanceof Error ? err.message : 'Could not save this hand for Improve.');
+        });
+    }
     const currentSessionId = sessionId;
     const persistDecision = currentSessionId
       ? Promise.resolve(currentSessionId)
@@ -174,7 +258,7 @@ export function TrainerScreen() {
 
   function changeFilter(filter: SpotTypeFilter) {
     setWrongPracticeMode(false);
-    setTestMode(false);
+    setPracticeNotice(null);
     setSpotTypeFilter(filter);
     setPosFilter([]);
   }
@@ -220,7 +304,7 @@ export function TrainerScreen() {
 
   const accuracy = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
   const sessionSolvr = solvrScore.count > 0 ? Math.round((solvrScore.sum / solvrScore.count) * 100) : null;
-  const filterActive = testMode || wrongPracticeMode || posFilter.length > 0 || spotTypeFilter !== 'ANY';
+  const filterActive = posFilter.length > 0 || spotTypeFilter !== 'ANY';
   const availableActions = deal ? availableActionsForSpot(deal.hands) : FALLBACK_ACTIONS;
   const tableProps = deal ? pokerTablePropsFromSpot(deal.spot, deal.hand) : DEFAULT_TABLE_PROPS;
   const showQuizChrome = phase !== 'result';
@@ -250,28 +334,17 @@ export function TrainerScreen() {
         </Pressable>
 
         <View style={styles.headerCenter}>
-          {testMode && (
-            <>
-              <Pressable onPress={() => setTestMode(false)} style={styles.smallHeaderButton}>
-                <Text style={styles.smallHeaderButtonText}>Trainer</Text>
-              </Pressable>
-              <Pressable onPress={() => setTestMode(false)} style={styles.endTestButton}>
-                <Text style={styles.endTestButtonText}>End Test</Text>
-              </Pressable>
-            </>
-          )}
-
-          {wrongPracticeMode && !testMode && (
+          {wrongPracticeMode && (
             <Pressable onPress={() => setWrongPracticeMode(false)} style={styles.smallHeaderButton}>
               <Text style={styles.smallHeaderButtonText}>Trainer</Text>
             </Pressable>
           )}
 
-          {!testMode && !wrongPracticeMode && (
+          {!wrongPracticeMode && (
             <>
               <View style={styles.statPill}>
                 <Text style={styles.statPillText}>
-                  {stats.correct}/{stats.total} - {accuracy}%{sessionSolvr !== null ? ` · S ${sessionSolvr}` : ''}
+                  {stats.correct}/{stats.total} - {accuracy}%
                 </Text>
               </View>
               <Pressable onPress={resetSessionStats} style={styles.smallHeaderButton}>
@@ -284,17 +357,24 @@ export function TrainerScreen() {
         <AnimatedFiltersButton active={filterActive} onPress={toggleFilters} />
       </View>}
 
-        {showQuizChrome && <View style={styles.progressTrack}>
-          <View
-            style={[
-              styles.progressFill,
-            {
-              width: `${testMode ? 0 : accuracy}%`,
-              backgroundColor: testMode ? '#14b8a6' : wrongPracticeMode ? C.purpleLight : C.green,
-            },
-            ]}
-          />
-        </View>}
+        {showQuizChrome && (
+          <View style={styles.progressArea}>
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                {
+                  width: `${accuracy}%`,
+                  backgroundColor: wrongPracticeMode ? C.purpleLight : C.green,
+                },
+                ]}
+              />
+            </View>
+            {!wrongPracticeMode && sessionSolvr !== null && (
+              <Text style={styles.progressSolvrText}>S {sessionSolvr}</Text>
+            )}
+          </View>
+        )}
 
         {error ? (
         <View style={styles.statePanel}>
@@ -314,6 +394,11 @@ export function TrainerScreen() {
         <>
           <View style={styles.tableStage}>
             <PokerTable {...tableProps} dealKey={dealKey} />
+            {practiceNotice && showQuizChrome && !error && (
+              <Animated.View pointerEvents="none" style={[styles.tableNoticePanel, { opacity: noticeOpacity }]}>
+                <Text style={styles.noticeText}>{practiceNotice}</Text>
+              </Animated.View>
+            )}
           </View>
 
           <View style={styles.actionDock}>
@@ -330,8 +415,14 @@ export function TrainerScreen() {
                       actionStyle(action),
                       active && styles.actionButtonPicked,
                       (!deal || handLoading) && styles.actionButtonDisabled,
-                    ]}
+                  ]}
                   >
+                    <LinearGradient
+                      colors={actionGradient(action)}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 1 }}
+                      style={StyleSheet.absoluteFill}
+                    />
                     <Text style={styles.actionText}>{actionLabel(action, deal?.spot.raiseBB ?? 0)}</Text>
                   </Pressable>
                 );
@@ -343,6 +434,11 @@ export function TrainerScreen() {
         <>
           <View style={styles.tableStage}>
             <PokerTable {...tableProps} dealKey="initial" />
+            {practiceNotice && showQuizChrome && !error && (
+              <Animated.View pointerEvents="none" style={[styles.tableNoticePanel, { opacity: noticeOpacity }]}>
+                <Text style={styles.noticeText}>{practiceNotice}</Text>
+              </Animated.View>
+            )}
           </View>
 
           <View style={styles.actionDock}>
@@ -353,6 +449,12 @@ export function TrainerScreen() {
                   disabled
                   style={[styles.actionButton, actionStyle(action), styles.actionButtonDisabled]}
                 >
+                  <LinearGradient
+                    colors={actionGradient(action)}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={StyleSheet.absoluteFill}
+                  />
                   <Text style={styles.actionText}>{actionLabel(action, 0)}</Text>
                 </Pressable>
               ))}
@@ -372,11 +474,11 @@ export function TrainerScreen() {
             spotTypeFilter={spotTypeFilter}
             posFilter={posFilter}
             wrongPracticeMode={wrongPracticeMode}
-            testMode={testMode}
+            improveCount={improveCount}
             onSpotTypeChange={changeFilter}
             onPositionToggle={(position) => {
               setWrongPracticeMode(false);
-              setTestMode(false);
+              setPracticeNotice(null);
               setPosFilter((current) =>
                 current.includes(position)
                   ? current.filter((item) => item !== position)
@@ -384,12 +486,15 @@ export function TrainerScreen() {
               );
             }}
             onImproveToggle={() => {
-              setTestMode(false);
+              if (improveCount <= 0) {
+                setPracticeNotice('Improve unlocks after you miss a hand.');
+                closeFilters();
+                return;
+              }
+              setPracticeNotice(null);
               setWrongPracticeMode((current) => !current);
-            }}
-            onTestToggle={() => {
-              setWrongPracticeMode(false);
-              setTestMode((current) => !current);
+              setPicked(null);
+              setPhase('quiz');
             }}
           />
         </TrainerFiltersOverlay>
@@ -580,20 +685,18 @@ function TrainerFiltersPanel({
   spotTypeFilter,
   posFilter,
   wrongPracticeMode,
-  testMode,
+  improveCount,
   onSpotTypeChange,
   onPositionToggle,
   onImproveToggle,
-  onTestToggle,
 }: {
   spotTypeFilter: SpotTypeFilter;
   posFilter: string[];
   wrongPracticeMode: boolean;
-  testMode: boolean;
+  improveCount: number;
   onSpotTypeChange: (filter: SpotTypeFilter) => void;
   onPositionToggle: (position: string) => void;
   onImproveToggle: () => void;
-  onTestToggle: () => void;
 }) {
   return (
     <View style={styles.filtersPanel}>
@@ -601,7 +704,7 @@ function TrainerFiltersPanel({
         <Text style={styles.filterSectionTitle}>Spot type</Text>
         <View style={styles.spotTypeGrid}>
           {spotFilters.map((filter) => {
-            const active = !wrongPracticeMode && !testMode && spotTypeFilter === filter.value;
+            const active = !wrongPracticeMode && spotTypeFilter === filter.value;
             return (
               <Pressable
                 key={filter.value}
@@ -623,7 +726,7 @@ function TrainerFiltersPanel({
         </Text>
         <View style={styles.positionRow}>
           {allPositions.map((position) => {
-            const active = !wrongPracticeMode && !testMode && posFilter.includes(position);
+            const active = !wrongPracticeMode && posFilter.includes(position);
             return (
               <Pressable
                 key={position}
@@ -644,25 +747,26 @@ function TrainerFiltersPanel({
         <View style={styles.practiceGrid}>
           <Pressable
             onPress={onImproveToggle}
-            style={[styles.practiceButton, styles.improveButton, wrongPracticeMode && styles.improveButtonActive]}
+            disabled={improveCount <= 0}
+            style={[
+              styles.practiceButton,
+              styles.improveButton,
+              improveCount <= 0 && styles.practiceButtonDisabled,
+              wrongPracticeMode && styles.improveButtonActive,
+            ]}
           >
-            <Text style={[styles.practiceButtonText, styles.improveButtonText, wrongPracticeMode && styles.practiceButtonTextActive]}>
+            <Text
+              style={[
+                styles.practiceButtonText,
+                styles.improveButtonText,
+                improveCount <= 0 && styles.practiceButtonTextDisabled,
+                wrongPracticeMode && styles.practiceButtonTextActive,
+              ]}
+            >
               Improve
             </Text>
             <View style={[styles.practiceBadge, wrongPracticeMode && styles.practiceBadgeActive]}>
-              <Text style={styles.practiceBadgeText}>0</Text>
-            </View>
-          </Pressable>
-
-          <Pressable
-            onPress={onTestToggle}
-            style={[styles.practiceButton, styles.testButton, testMode && styles.testButtonActive]}
-          >
-            <Text style={[styles.practiceButtonText, styles.testButtonText, testMode && styles.practiceButtonTextActive]}>
-              Test
-            </Text>
-            <View style={[styles.practiceBadge, testMode && styles.practiceBadgeActive]}>
-              <Text style={styles.practiceBadgeText}>New</Text>
+              <Text style={styles.practiceBadgeText}>{improveCount}</Text>
             </View>
           </Pressable>
         </View>
@@ -849,6 +953,12 @@ function TrainerResultView({
 
       <View style={styles.resultNextDock}>
         <Pressable onPress={onNextHand} style={[styles.actionButton, styles.resultNextButton]}>
+          <LinearGradient
+            colors={['#8b5cf6', '#7c3aed', '#6d28d9']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={StyleSheet.absoluteFill}
+          />
           <Text style={styles.resultNextButtonText}>Next Hand</Text>
         </Pressable>
       </View>
@@ -914,6 +1024,13 @@ function actionStyle(action: TrainerAction) {
   return styles.allInButton;
 }
 
+function actionGradient(action: TrainerAction): [string, string, string] {
+  if (action === 'Fold') return ['#76adff', C.blue, '#1d4ed8'];
+  if (action === 'Call') return ['#63e68e', C.green, '#12803a'];
+  if (action === 'Raise') return ['#ff7474', C.red, '#b91c1c'];
+  return ['#bd2b2b', C.allIn, '#450a0a'];
+}
+
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
@@ -931,6 +1048,7 @@ const styles = StyleSheet.create({
   tableStage: {
     marginHorizontal: -2,
     marginTop: -24,
+    position: 'relative',
   },
   filterHeader: {
     alignItems: 'center',
@@ -994,19 +1112,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '900',
   },
-  endTestButton: {
-    backgroundColor: C.surface2,
-    borderColor: C.border,
-    borderRadius: 20,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-  },
-  endTestButtonText: {
-    color: C.red,
-    fontSize: 11,
-    fontWeight: '900',
-  },
   filtersToggle: {
     alignItems: 'center',
     backgroundColor: C.surface2,
@@ -1033,17 +1138,55 @@ const styles = StyleSheet.create({
     backgroundColor: C.purpleLight,
     borderRadius: 999,
   },
+  progressArea: {
+    height: 5,
+    marginTop: -8,
+    position: 'relative',
+  },
   progressTrack: {
     backgroundColor: C.surface2,
     borderColor: C.border,
     borderRadius: 999,
     borderWidth: 1,
     height: 5,
-    marginTop: -8,
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
+  },
+  progressSolvrText: {
+    color: C.textMuted,
+    fontSize: 10,
+    fontWeight: '900',
+    left: 1,
+    position: 'absolute',
+    top: 8,
+  },
+  tableNoticePanel: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(187,247,208,0.94)',
+    borderColor: '#22c55e',
+    borderRadius: 12,
+    borderWidth: 2,
+    left: 28,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    position: 'absolute',
+    right: 28,
+    shadowColor: '#052e16',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.38,
+    shadowRadius: 14,
+    top: '43%',
+    transform: [{ translateY: -22 }],
+    zIndex: 20,
+    elevation: 12,
+  },
+  noticeText: {
+    color: '#052e16',
+    fontSize: 13,
+    fontWeight: '900',
+    textAlign: 'center',
   },
   filtersOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -1192,17 +1335,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 9,
     paddingVertical: 9,
   },
+  practiceButtonDisabled: {
+    opacity: 0.45,
+  },
   improveButton: {
     backgroundColor: 'rgba(34,197,94,0.13)',
   },
   improveButtonActive: {
     backgroundColor: C.green,
-  },
-  testButton: {
-    backgroundColor: 'rgba(239,68,68,0.13)',
-  },
-  testButtonActive: {
-    backgroundColor: C.red,
   },
   practiceButtonText: {
     fontSize: 12,
@@ -1211,11 +1351,11 @@ const styles = StyleSheet.create({
   improveButtonText: {
     color: '#86efac',
   },
-  testButtonText: {
-    color: '#fca5a5',
-  },
   practiceButtonTextActive: {
     color: 'white',
+  },
+  practiceButtonTextDisabled: {
+    color: C.textMuted,
   },
   practiceBadge: {
     alignItems: 'center',
@@ -1367,6 +1507,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     flex: 1,
     flexBasis: 0,
+    overflow: 'hidden',
     minHeight: 78,
     justifyContent: 'center',
     paddingHorizontal: 6,

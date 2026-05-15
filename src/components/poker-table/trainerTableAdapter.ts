@@ -46,8 +46,23 @@ function foldedPositionsForSpot(spot: TrainerSpot) {
   return seats.filter((seat, index) => {
     if (active.has(seat)) return false;
     if (spot.type === 'RFI') return index < heroIndex;
-    return index < heroIndex || seat === 'SB' || seat === 'BB';
+    if (spot.type === 'VO') return actedBetween(spot.opener, spot.hero, seat);
+    return true;
   });
+}
+
+function actedBetween(from: string | null, to: string, seat: SeatPosition) {
+  if (!from) return false;
+  const fromIndex = seats.indexOf(asSeat(from));
+  const toIndex = seats.indexOf(asSeat(to));
+  const seatIndex = seats.indexOf(seat);
+  if (fromIndex < 0 || toIndex < 0 || seatIndex < 0) return false;
+
+  if (fromIndex < toIndex) {
+    return seatIndex > fromIndex && seatIndex < toIndex;
+  }
+
+  return seatIndex > fromIndex || seatIndex < toIndex;
 }
 
 function cardsForHandClass(hand: string): [PlayingCard, PlayingCard] {

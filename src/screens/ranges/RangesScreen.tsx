@@ -12,13 +12,13 @@ import {
 } from 'react-native';
 import { useSQLiteContext } from 'expo-sqlite';
 import { useIsFocused } from '@react-navigation/native';
+import { LinearGradient } from 'expo-linear-gradient';
 
 import { RangeLegend } from '../../components/range-grid/RangeGrid';
 import { C } from '../../constants/colors';
 import {
   availableActionsForSpot,
   formatBB,
-  scenarioLabel,
   type TrainerHandFrequencies,
   type TrainerSpot,
 } from '../../data/trainerDb';
@@ -135,6 +135,21 @@ function spotFromNodeRow(node: NodeRow): TrainerSpot {
   };
 }
 
+function compactScenarioLabel(spot: TrainerSpot) {
+  if (spot.type === 'RFI') return `${spot.hero} RFI ${compactBB(spot.raiseBB)}`;
+
+  const actions: string[] = [];
+  if (spot.opener) actions.push(`${spot.opener}${compactBB(spot.openerRaiseBB ?? spot.facingBB)}`);
+  if (spot.threebetter) actions.push(`${spot.threebetter}${compactBB(spot.threebetBB ?? spot.facingBB)}`);
+  if (spot.fourbetter) actions.push(`${spot.fourbetter}${compactBB(spot.facingBB)}`);
+  return `${spot.hero} vs ${actions.join(', ')}`;
+}
+
+function compactBB(value?: number | null) {
+  const number = Number(value || 0);
+  return `${Number.isInteger(number) ? number.toFixed(0) : number.toFixed(1)}BB`;
+}
+
 // ─── Position pill state ──────────────────────────────────────────────────────
 
 type PillState = 'hero' | 'raised' | 'folded' | 'pending' | 'inactive';
@@ -179,7 +194,7 @@ export function RangesScreen() {
   const cache = useMemo(() => new Map<number, NodeData>(), [db]);
 
   const spot = useMemo(() => (nodeData ? spotFromNodeRow(nodeData.node) : null), [nodeData]);
-  const label = useMemo(() => (spot ? scenarioLabel(spot) : ''), [spot]);
+  const label = useMemo(() => (spot ? compactScenarioLabel(spot) : ''), [spot]);
 
   const loadAndCache = useCallback(
     async (id: number): Promise<NodeData | null> => {
@@ -342,6 +357,7 @@ export function RangesScreen() {
         style={{ flex: 1 }}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
+        overScrollMode="never"
       >
         {/* Header nav row */}
         <View style={styles.headerRow}>
@@ -416,11 +432,13 @@ export function RangesScreen() {
             <View style={styles.actionGrid}>
               {hasFold && (
                 <Pressable style={[styles.actionButton, styles.foldButton]} onPress={() => handleAction('fold')}>
+                  <LinearGradient colors={actionGradient('fold')} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
                   <Text style={styles.actionText}>Fold</Text>
                 </Pressable>
               )}
               {hasCall && (
                 <Pressable style={[styles.actionButton, styles.callButton]} onPress={() => handleAction('call')}>
+                  <LinearGradient colors={actionGradient('call')} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
                   <Text style={styles.actionText}>
                     Call{spot?.facingBB ? ` ${formatBB(spot.facingBB)}` : ''}
                   </Text>
@@ -428,6 +446,7 @@ export function RangesScreen() {
               )}
               {hasRaise && (
                 <Pressable style={[styles.actionButton, styles.raiseButton]} onPress={() => handleAction('raise')}>
+                  <LinearGradient colors={actionGradient('raise')} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
                   <Text style={styles.actionText}>
                     Raise{nodeData.node.proposed_raise_bb ? ` ${formatBB(nodeData.node.proposed_raise_bb)}` : ''}
                   </Text>
@@ -435,6 +454,7 @@ export function RangesScreen() {
               )}
               {hasAllIn && (
                 <Pressable style={[styles.actionButton, styles.allInButton]} onPress={() => handleAction('all_in')}>
+                  <LinearGradient colors={actionGradient('all_in')} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={StyleSheet.absoluteFill} />
                   <Text style={styles.actionText}>All-in</Text>
                 </Pressable>
               )}
@@ -442,7 +462,6 @@ export function RangesScreen() {
           </View>
         )}
 
-        <View style={{ height: 20 }} />
       </ScrollView>
     </View>
   );
@@ -706,6 +725,13 @@ function posPillTextStyle(state: PillState): object {
   return styles.posPillTextInactive;
 }
 
+function actionGradient(action: NavAction): [string, string, string] {
+  if (action === 'fold') return ['#76adff', C.blue, '#1d4ed8'];
+  if (action === 'call') return ['#63e68e', C.green, '#12803a'];
+  if (action === 'raise') return ['#ff7474', C.red, '#b91c1c'];
+  return ['#bd2b2b', C.allIn, '#450a0a'];
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
@@ -714,10 +740,11 @@ const styles = StyleSheet.create({
     backgroundColor: C.bg,
   },
   content: {
-    paddingHorizontal: 16,
+    flexGrow: 1,
+    paddingHorizontal: 20,
     paddingTop:
       (Platform.OS === 'android' ? NativeStatusBar.currentHeight ?? 0 : 0) + TOP_CONTENT_OFFSET,
-    paddingBottom: 24,
+    paddingBottom: 0,
     gap: 12,
   },
   headerRow: {
@@ -878,6 +905,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   actionDock: {
+    marginHorizontal: -13,
     paddingBottom: 6,
     paddingTop: 0,
   },
@@ -892,6 +920,7 @@ const styles = StyleSheet.create({
     flexBasis: 0,
     minHeight: 78,
     justifyContent: 'center',
+    overflow: 'hidden',
     paddingHorizontal: 6,
     paddingVertical: 12,
   },

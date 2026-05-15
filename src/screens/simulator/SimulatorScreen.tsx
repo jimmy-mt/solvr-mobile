@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { PokerTable } from '../../components/poker-table/PokerTable';
@@ -219,6 +220,12 @@ export function SimulatorScreen() {
                   pressed && styles.pressed,
                 ]}
               >
+                <LinearGradient
+                  colors={simActionGradient(action)}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={StyleSheet.absoluteFill}
+                />
                 <Text style={[styles.actionText, !enabled && styles.actionTextDisabled]}>{actionLabel(action)}</Text>
               </Pressable>
             );
@@ -356,6 +363,13 @@ function ActionLog({ game }: { game: SimGameState }) {
 function actionLabel(action: SimAction) {
   if (action === 'jam') return 'Jam';
   return action.charAt(0).toUpperCase() + action.slice(1);
+}
+
+function simActionGradient(action: SimAction): [string, string, string] {
+  if (action === 'fold') return ['#4f96f8', '#315f9f', '#18284a'];
+  if (action === 'call') return ['#34d978', '#1f8f51', '#10351f'];
+  if (action === 'raise') return ['#76adff', '#3b82f6', '#1e3a8a'];
+  return ['#ef4444', '#9f2929', '#450a0a'];
 }
 
 function suitLabel(suit: SimGameState['hands'][SeatPosition][number]['suit']) {
@@ -610,6 +624,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     minHeight: 46,
+    overflow: 'hidden',
     paddingHorizontal: 6,
   },
   raiseButton: {

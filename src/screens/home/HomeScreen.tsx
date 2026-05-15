@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { PokerCard } from '../../components/poker-table/PokerCard';
@@ -19,6 +20,7 @@ import {
   type PerformanceDecision,
   type PerformanceSession,
 } from '../../data/performanceStore';
+import { getDailyGoal, type DailyGoal } from '../../data/appSettingsStore';
 import type { SpotTypeFilter } from '../../data/trainerDb';
 
 type TimeFilter = '7D' | '30D' | 'ALL';
@@ -77,8 +79,6 @@ const spotLabels: Record<Exclude<SpotTypeFilter, 'ANY'>, string> = {
   V3B: 'VS 3Bet',
   V4B: 'VS 4Bet',
 };
-const DAILY_STREAK_GOAL = 10;
-
 export function HomeScreen() {
   const router = useRouter();
   const [view, setView] = useState<'home' | 'analytics' | 'equity' | 'sessions'>('home');
@@ -92,15 +92,17 @@ export function HomeScreen() {
   const [showAnalyticsFilters, setShowAnalyticsFilters] = useState(false);
   const [showStreakModal, setShowStreakModal] = useState(false);
   const [tableMetric, setTableMetric] = useState<TableMetric>('solvr');
+  const [dailyGoal, setDailyGoalState] = useState<DailyGoal>(10);
 
   const loadScores = useCallback(() => {
     let active = true;
     setLoading(true);
-    Promise.all([getPerformanceDecisions(), getPerformanceSessions()])
-      .then(([decisionRows, sessionRows]) => {
+    Promise.all([getPerformanceDecisions(), getPerformanceSessions(), getDailyGoal()])
+      .then(([decisionRows, sessionRows, savedDailyGoal]) => {
         if (active) {
           setDecisions(decisionRows);
           setPerformanceSessions(sessionRows);
+          setDailyGoalState(savedDailyGoal);
         }
       })
       .catch(() => {
@@ -156,7 +158,7 @@ export function HomeScreen() {
   }, [decisions]);
   const allTimeOverall = useMemo(() => summarizeRows('overall', 'Overall', decisions), [decisions]);
   const sessions = useMemo(() => buildSessionSummaries(decisions, performanceSessions), [decisions, performanceSessions]);
-  const streak = useMemo(() => buildStreakSummary(decisions), [decisions]);
+  const streak = useMemo(() => buildStreakSummary(decisions, dailyGoal), [dailyGoal, decisions]);
 
   if (view === 'analytics') {
     return (
@@ -196,12 +198,16 @@ export function HomeScreen() {
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.homeContent} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
+        <View style={styles.subscriptionStatus}>
+          <Text style={styles.subscriptionStatusLabel}>Plan</Text>
+          <Text style={styles.subscriptionStatusValue}>Free</Text>
+        </View>
         <Text style={styles.title}>Solvr</Text>
         <Pressable
           onPress={() => setShowStreakModal(true)}
           style={({ pressed }) => [styles.streakButton, pressed && styles.analyticsCardPressed]}
           accessibilityRole="button"
-          accessibilityLabel={`Daily streak. ${streak.todayHands} of ${DAILY_STREAK_GOAL} hands complete today.`}
+          accessibilityLabel={`Daily streak. ${streak.todayHands} of ${dailyGoal} hands complete today.`}
         >
           <Text style={styles.streakIcon}>🔥</Text>
           <View style={styles.streakTrack}>
@@ -214,15 +220,14 @@ export function HomeScreen() {
         onPress={() => setView('analytics')}
         style={({ pressed }) => [styles.analyticsCard, pressed && styles.analyticsCardPressed]}
       >
-        <View style={styles.cardTopRow}>
-          <Text style={styles.cardEyebrow}>Training Breakdown</Text>
-          <View style={styles.cardCtaPill}>
-            <Text style={styles.cardCtaText}>Open</Text>
-            <Text style={styles.cardCtaArrow}>{'>'}</Text>
-          </View>
-        </View>
+        <LinearGradient
+          colors={['#b43ee5', '#8b5cf6', '#6c2ed2']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
         <MiniPositionTable positions={allTimePositionCards} overallScore={allTimeOverall.score} />
-        <Text style={styles.cardTapHint}>Tap to review scores by spot and position</Text>
+        <Text style={styles.statsTapHint}>Tap to review</Text>
       </Pressable>
 
       <Pressable
@@ -299,7 +304,7 @@ export function HomeScreen() {
               <View style={styles.streakModalProgressTop}>
                 <Text style={styles.streakModalProgressLabel}>Today</Text>
                 <Text style={styles.streakModalProgressValue}>
-                  {Math.min(streak.todayHands, DAILY_STREAK_GOAL)}/{DAILY_STREAK_GOAL} hands
+                  {Math.min(streak.todayHands, dailyGoal)}/{dailyGoal} hands
                 </Text>
               </View>
               <View style={styles.streakModalTrack}>
@@ -307,7 +312,7 @@ export function HomeScreen() {
               </View>
             </View>
             <Text style={styles.infoModalText}>
-              Complete {DAILY_STREAK_GOAL} trainer hands in a day to light the streak bar.
+              Complete {dailyGoal} trainer hands in a day to light the streak bar.
               {streak.goalMet ? ' Today is already counted.' : ' Keep going to count today.'}
             </Text>
           </Pressable>
@@ -1284,7 +1289,7 @@ function formatMetric(stats: GroupStats, metric: TableMetric) {
 
 function scoreColor(score: number | null) {
   if (score == null) return C.surface;
-  const pct = clampScore(score) * 100;
+  const pct = Math.round(clampScore(score) * 100);
   if (pct <= 70) return 'hsl(0, 58%, 26%)';
   if (pct < 80) return 'hsl(18, 62%, 34%)';
   if (pct < 90) return 'hsl(42, 68%, 38%)';
@@ -1339,7 +1344,7 @@ function percent(value: number) {
   return `${(Math.max(0, Math.min(1, value)) * 100).toFixed(1)}%`;
 }
 
-function buildStreakSummary(decisions: PerformanceDecision[]): StreakSummary {
+function buildStreakSummary(decisions: PerformanceDecision[], dailyGoal: number): StreakSummary {
   const countsByDay = new Map<string, number>();
   decisions.forEach((decision) => {
     const key = dayKey(decision.timestamp);
@@ -1348,18 +1353,18 @@ function buildStreakSummary(decisions: PerformanceDecision[]): StreakSummary {
 
   const today = startOfLocalDay(Date.now());
   const todayHands = countsByDay.get(dayKey(today.getTime())) ?? 0;
-  const goalMet = todayHands >= DAILY_STREAK_GOAL;
+  const goalMet = todayHands >= dailyGoal;
   let streakCursor = goalMet ? today : addDays(today, -1);
   let currentStreak = 0;
 
-  while ((countsByDay.get(dayKey(streakCursor.getTime())) ?? 0) >= DAILY_STREAK_GOAL) {
+  while ((countsByDay.get(dayKey(streakCursor.getTime())) ?? 0) >= dailyGoal) {
     currentStreak += 1;
     streakCursor = addDays(streakCursor, -1);
   }
 
   return {
     todayHands,
-    progress: Math.min(1, todayHands / DAILY_STREAK_GOAL),
+    progress: Math.min(1, todayHands / dailyGoal),
     goalMet,
     currentStreak,
   };
@@ -1404,6 +1409,33 @@ const styles = StyleSheet.create({
     gap: 6,
     position: 'relative',
   },
+  subscriptionStatus: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(139, 92, 246, 0.14)',
+    borderColor: 'rgba(196, 181, 253, 0.34)',
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 1,
+    left: 0,
+    width: 112,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    position: 'absolute',
+    top: -2,
+  },
+  subscriptionStatusLabel: {
+    color: C.textMuted,
+    fontSize: 8,
+    fontWeight: '900',
+    lineHeight: 10,
+    textTransform: 'uppercase',
+  },
+  subscriptionStatusValue: {
+    color: C.purplePale,
+    fontSize: 13,
+    fontWeight: '900',
+    lineHeight: 16,
+  },
   analyticsHeader: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -1434,7 +1466,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: 0,
     top: -2,
-    width: 54,
+    width: 112,
   },
   streakIcon: {
     fontSize: 18,
@@ -1473,14 +1505,19 @@ const styles = StyleSheet.create({
   },
   analyticsCard: {
     alignItems: 'center',
-    backgroundColor: 'rgba(34, 21, 64, 0.72)',
-    borderColor: 'rgba(196, 181, 253, 0.34)',
-    borderRadius: 18,
-    borderWidth: 1,
-    gap: 14,
-    minHeight: 202,
+    backgroundColor: '#7c3aed',
+    borderColor: 'rgba(237, 233, 254, 0.66)',
+    borderRadius: 22,
+    borderWidth: 2,
+    gap: 12,
+    minHeight: 250,
     overflow: 'hidden',
-    padding: 20,
+    padding: 16,
+    shadowColor: '#a855f7',
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    elevation: 9,
   },
   analyticsCardPressed: {
     opacity: 0.82,
@@ -1491,6 +1528,64 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     width: '100%',
+  },
+  statsCardTopRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    width: '100%',
+  },
+  statsSummaryItem: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+    borderColor: 'rgba(255, 255, 255, 0.28)',
+    borderRadius: 14,
+    borderWidth: 1,
+    flex: 1,
+    paddingVertical: 11,
+  },
+  statsSummaryValue: {
+    color: 'white',
+    fontSize: 24,
+    fontWeight: '900',
+    lineHeight: 27,
+  },
+  statsSummaryLabel: {
+    color: 'rgba(255,255,255,0.82)',
+    fontSize: 9,
+    fontWeight: '900',
+    lineHeight: 12,
+    textTransform: 'uppercase',
+  },
+  statsOpenPill: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderColor: 'rgba(255,255,255,0.96)',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 5,
+    minHeight: 54,
+    paddingHorizontal: 15,
+  },
+  statsOpenText: {
+    color: '#581c87',
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  statsOpenArrow: {
+    color: '#581c87',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  statsTapHint: {
+    color: 'rgba(255,255,255,0.76)',
+    fontSize: 12,
+    fontWeight: '900',
+    lineHeight: 15,
+    textAlign: 'center',
+    textTransform: 'uppercase',
   },
   analyticsText: {
     flex: 1,
@@ -1589,10 +1684,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#1a5c24',
     borderColor: '#0d2412',
     borderRadius: 999,
-    borderWidth: 5,
-    height: 118,
+    borderWidth: 7,
+    height: 190,
     position: 'relative',
-    width: '92%',
+    width: '100%',
   },
   miniInnerFelt: {
     backgroundColor: '#2e7d35',
@@ -1610,62 +1705,62 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignSelf: 'center',
     position: 'absolute',
-    top: 42,
-    width: 58,
+    top: 72,
+    width: 90,
   },
   miniCenterValue: {
     color: 'white',
-    fontSize: 27,
+    fontSize: 40,
     fontWeight: '900',
-    lineHeight: 30,
+    lineHeight: 43,
   },
   miniSeat: {
     alignItems: 'center',
     borderColor: 'rgba(255,255,255,0.24)',
     borderRadius: 999,
-    borderWidth: 1,
-    height: 40,
+    borderWidth: 2,
+    height: 58,
     justifyContent: 'center',
     position: 'absolute',
-    width: 56,
+    width: 74,
   },
   miniSeatUtg: {
-    left: 8,
-    top: 5,
+    left: 12,
+    top: 18,
   },
   miniSeatHj: {
     left: '50%',
-    marginLeft: -28,
-    top: -8,
+    marginLeft: -37,
+    top: -10,
   },
   miniSeatCo: {
-    right: 8,
-    top: 5,
+    right: 12,
+    top: 18,
   },
   miniSeatBtn: {
-    bottom: 5,
-    right: 8,
+    bottom: 18,
+    right: 12,
   },
   miniSeatSb: {
-    bottom: -8,
+    bottom: -10,
     left: '50%',
-    marginLeft: -28,
+    marginLeft: -37,
   },
   miniSeatBb: {
-    bottom: 5,
-    left: 8,
+    bottom: 18,
+    left: 12,
   },
   miniSeatScore: {
     color: 'white',
-    fontSize: 13,
+    fontSize: 17,
     fontWeight: '900',
-    lineHeight: 15,
+    lineHeight: 19,
   },
   miniSeatLabel: {
     color: 'rgba(255,255,255,0.86)',
-    fontSize: 9,
+    fontSize: 11,
     fontWeight: '900',
-    lineHeight: 11,
+    lineHeight: 13,
   },
   backButton: {
     alignSelf: 'flex-start',

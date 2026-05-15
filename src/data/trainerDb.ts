@@ -85,6 +85,23 @@ export async function dealRandomTrainerHand(
   };
 }
 
+export async function loadTrainerHand(
+  db: SQLiteDatabase,
+  nodeId: number,
+  hand: string,
+): Promise<TrainerDeal | null> {
+  const loaded = await loadNodeById(db, nodeId);
+  const handFreq = loaded?.hands[hand];
+  if (!loaded || !handFreq) return null;
+
+  return {
+    spot: spotFromNode(loaded.node),
+    hand,
+    handFreq,
+    hands: loaded.hands,
+  };
+}
+
 async function getRandomNodeId(
   db: SQLiteDatabase,
   layers: number[],
